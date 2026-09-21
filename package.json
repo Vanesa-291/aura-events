@@ -1,0 +1,18 @@
+{
+  "name": "aura-events",
+  "version": "1.0.0",
+  "description": "Aura Events — Plataforma de gestión de eventos e inscripciones",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "author": "Vanesa",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongoose": "^8.4.1"
+  }
+}
