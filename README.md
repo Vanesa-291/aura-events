@@ -9,9 +9,11 @@
 
 ## Temática elegida
 
-**Aura Events** es una plataforma para la gestión de eventos e inscripciones. Permite crear y administrar eventos, y más adelante — a medida que el proyecto avance — gestionar usuarios, sesiones, cupos y tickets de inscripción.
+**Aura Events** es una plataforma para la gestión de eventos e inscripciones. Permite crear y administrar eventos, y más adelante — a medida que el proyecto avance — gestionar sesiones, cupos y tickets de inscripción.
 
-Esta primera entrega establece la base arquitectónica del backend: un servidor Express organizado por capas, listo para crecer sin necesidad de reordenar nada más adelante.
+La Pre-entrega 1 estableció la base arquitectónica del backend: un servidor Express organizado por capas, listo para crecer sin necesidad de reordenar nada más adelante.
+
+La Pre-entrega 2 suma el primer flujo real de usuarios: el registro seguro, con validaciones, contraseñas protegidas con bcrypt y persistencia en MongoDB.
 
 ---
 
@@ -24,6 +26,7 @@ Esta primera entrega establece la base arquitectónica del backend: un servidor 
 | MongoDB Atlas | Base de datos |
 | Mongoose | Modelado de datos sobre MongoDB |
 | dotenv | Variables de entorno |
+| bcryptjs | Hasheo seguro de contraseñas |
 
 ---
 
@@ -93,19 +96,24 @@ aura-events/
 │   │   ├── events.controller.js
 │   │   └── sessions.controller.js
 │   ├── services/
-│   │   └── events.service.js
+│   │   ├── events.service.js
+│   │   └── sessions.service.js      # lógica del registro de usuarios
 │   ├── repositories/
-│   │   └── events.repository.js
+│   │   ├── events.repository.js
+│   │   └── users.repository.js
 │   ├── dao/
-│   │   └── events.dao.js
+│   │   ├── events.dao.js
+│   │   └── users.dao.js
 │   ├── models/
-│   │   ├── User.js
+│   │   ├── User.js                  # first_name, last_name, email, password, role
 │   │   └── Event.js
 │   ├── middlewares/
 │   │   ├── notFound.middleware.js
 │   │   └── errorHandler.middleware.js
 │   ├── utils/
-│   │   └── asyncHandler.js
+│   │   ├── asyncHandler.js
+│   │   ├── appError.js              # errores con status code (400, 409, etc.)
+│   │   └── hash.js                  # hashPassword / comparePassword (bcrypt)
 │   ├── app.js                 # arma la aplicación de Express (sin levantarla)
 │   └── server.js              # valida el entorno, conecta la base y levanta el servidor
 ├── .env.example
@@ -130,20 +138,92 @@ Cada capa hace una sola cosa: el router solo conecta una URL con su controlador,
 |---|---|---|---|
 | `GET` | `/api/health` | Confirma que el servidor está activo | `{ "status": "ok", "message": "Servidor activo" }` |
 | `GET` | `/api/events` | Lista los eventos existentes (vacía por ahora) | `{ "status": "success", "payload": [] }` |
-| `GET` | `/api/sessions` | Confirma que la ruta está preparada | Mensaje indicando que la autenticación llega en una próxima entrega |
+| `GET` | `/api/sessions` | Confirma que la ruta está preparada | Mensaje indicando que el login llega en una próxima entrega |
+| `POST` | `/api/sessions/register` | Registra un usuario nuevo | Ver detalle abajo |
+
+---
+
+## Registro de usuarios — `POST /api/sessions/register`
+
+### Campos que espera (todos obligatorios)
+
+| Campo | Tipo | Reglas |
+|---|---|---|
+| `first_name` | string | No puede estar vacío |
+| `last_name` | string | No puede estar vacío |
+| `email` | string | Formato de email válido; se normaliza (espacios afuera y minúsculas) antes de guardar; no puede repetirse |
+| `password` | string | Mínimo 6 caracteres |
+
+No hay que enviar `role`: todo usuario que se registra por esta vía entra siempre como `user`. Aunque se mande `role` en el body, el servidor lo ignora — no es un campo que se pueda manipular desde el registro público.
+
+### Ejemplo de petición
+
+```json
+POST /api/sessions/register
+Content-Type: application/json
+
+{
+  "first_name": "Ana",
+  "last_name": "Pérez",
+  "email": "Ana@Mail.com ",
+  "password": "Secreta123"
+}
+```
+
+### Respuesta 201 — registro exitoso
+
+Notá que el email quedó normalizado (minúsculas, sin espacios) y que **no aparece la contraseña en ningún lado de la respuesta**, ni en texto plano ni hasheada:
+
+```json
+{
+  "status": "success",
+  "payload": {
+    "_id": "665f2a...",
+    "first_name": "Ana",
+    "last_name": "Pérez",
+    "email": "ana@mail.com",
+    "role": "user",
+    "createdAt": "...",
+    "updatedAt": "..."
+  }
+}
+```
+
+### Respuestas de error
+
+| Situación | Status | Respuesta |
+|---|---|---|
+| Falta algún campo obligatorio | `400` | `{ "status": "error", "message": "Faltan campos obligatorios" }` |
+| El email no tiene formato válido | `400` | `{ "status": "error", "message": "El formato del email no es válido" }` |
+| La contraseña tiene menos de 6 caracteres | `400` | `{ "status": "error", "message": "La contraseña debe tener al menos 6 caracteres" }` |
+| El email ya está registrado | `409` | `{ "status": "error", "message": "El email ya está registrado" }` |
+
+### Cómo probarlo (con Thunder Client, o cualquier cliente HTTP similar)
+
+1. Levantá el servidor con `npm run dev` (o `npm start`).
+2. Creá una petición `POST` a `http://localhost:8080/api/sessions/register` (cambiá el puerto si usás otro).
+3. En el body, elegí `JSON` y escribí a mano (no pegues, para evitar comillas raras) algo como el ejemplo de arriba.
+4. Casos que conviene probar, en este orden:
+   - **Registro exitoso**: con datos válidos → esperás un `201`.
+   - **Campos faltantes**: sacá algún campo (por ejemplo `last_name`) → esperás un `400`.
+   - **Email inválido**: probá con algo como `"anamail.com"` (sin arroba) → esperás un `400`.
+   - **Email duplicado**: repetí la misma petición del registro exitoso una segunda vez → esperás un `409`.
+5. Para confirmar que la contraseña está bien protegida: entrá a MongoDB Atlas → tu cluster → "Browse Collections" → colección `users`, y mirá el documento creado. El campo `password` tiene que verse como un texto largo y sin sentido (el hash), nunca la contraseña que escribiste.
 
 ---
 
 ## Notas adicionales
 
-Esta entrega es intencionalmente mínima: el objetivo es dejar la arquitectura lista, no adelantar funcionalidad. En las próximas entregas se van a sumar, sobre esta misma base:
+El objetivo de este proyecto es ir creciendo entrega a entrega sobre la misma base, sin reordenar nada de lo ya construido. Lo que falta para las próximas entregas:
 
-- Registro, login y manejo de sesión (JWT, cookies, Passport)
-- Roles y autorización
+- Login, JWT, cookies y Passport
+- Ruta `current` para saber quién es el usuario logueado
+- Roles y autorización sobre las rutas
 - CRUD completo de eventos
 - Inscripciones, control de cupos y tickets
-- Validaciones de datos de entrada
 
 ---
 
 Desarrollado por Vanesa como parte del curso de Backend II.
+
+
