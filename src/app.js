@@ -5,6 +5,7 @@
 // escuchando en un puerto real.
 
 import express from 'express';
+import cookieParser from 'cookie-parser';
 
 import healthRouter   from './routes/health.router.js';
 import eventsRouter    from './routes/events.router.js';
@@ -17,6 +18,12 @@ const app = express();
 
 // Permite que Express entienda los cuerpos de petición en formato JSON.
 app.use(express.json());
+
+// Permite que Express lea las cookies que vienen en cada petición y las
+// deje disponibles en req.cookies (un objeto normal de JavaScript). Sin
+// esto, el middleware de autenticación no tendría forma de leer la
+// cookie "currentUser" que genera el login.
+app.use(cookieParser());
 
 // Cada recurso vive bajo su propio prefijo, y cada router se ocupa
 // únicamente de las rutas de su propio tema.
