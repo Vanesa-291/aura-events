@@ -8,7 +8,7 @@
 
 import 'dotenv/config';
 
-const REQUIRED_VARS = ['PORT', 'NODE_ENV', 'MONGO_URL', 'JWT_SECRET'];
+const REQUIRED_VARS = ['PORT', 'NODE_ENV', 'MONGO_URL', 'JWT_SECRET', 'JWT_EXPIRES_IN'];
 
 function validateEnv() {
   const missing = REQUIRED_VARS.filter((key) => !process.env[key]);
@@ -25,7 +25,15 @@ function validateEnv() {
 
 validateEnv();
 
-export const PORT       = process.env.PORT;
-export const NODE_ENV   = process.env.NODE_ENV;
-export const MONGO_URL  = process.env.MONGO_URL;
-export const JWT_SECRET = process.env.JWT_SECRET;
+export const PORT           = process.env.PORT;
+export const NODE_ENV       = process.env.NODE_ENV;
+export const MONGO_URL      = process.env.MONGO_URL;
+export const JWT_SECRET     = process.env.JWT_SECRET;
+
+// Cuánto tiempo dura un token antes de vencer. Se escribe con el mismo
+// formato que entiende la librería jsonwebtoken: por ejemplo "1h" (una
+// hora), "15m" (quince minutos), "7d" (siete días). Tenerlo en una
+// variable de entorno (y no escrito fijo en el código) permite, por
+// ejemplo, usar sesiones más cortas en producción y más largas mientras
+// se está desarrollando y probando, sin tocar ni una línea de código.
+export const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN;
