@@ -13,7 +13,9 @@
 
 La Pre-entrega 1 estableció la base arquitectónica del backend: un servidor Express organizado por capas, listo para crecer sin necesidad de reordenar nada más adelante.
 
-La Pre-entrega 2 suma el primer flujo real de usuarios: el registro seguro, con validaciones, contraseñas protegidas con bcrypt y persistencia en MongoDB.
+La Pre-entrega 2 sumó el primer flujo real de usuarios: el registro seguro, con validaciones, contraseñas protegidas con bcrypt y persistencia en MongoDB. Tras la corrección se afinaron dos detalles: ahora se rechaza un nombre compuesto solo por espacios en blanco, y un posible choque de emails duplicados ocurridos casi al mismo instante (registros simultáneos) también se maneja de forma prolija (409), en vez de terminar en un error de servidor (500).
+
+La Pre-entrega 3 suma la autenticación completa: login, generación de JWT, una cookie de sesión `httpOnly`, una ruta protegida para saber quién es el usuario autenticado, y logout.
 
 ---
 
@@ -27,6 +29,8 @@ La Pre-entrega 2 suma el primer flujo real de usuarios: el registro seguro, con 
 | Mongoose | Modelado de datos sobre MongoDB |
 | dotenv | Variables de entorno |
 | bcryptjs | Hasheo seguro de contraseñas |
+| jsonwebtoken | Generación y verificación de JWT |
+| cookie-parser | Lectura de cookies en las peticiones |
 
 ---
 
@@ -54,15 +58,17 @@ Y completá `.env` con tus propios valores:
 PORT=8080
 NODE_ENV=development
 MONGO_URL=mongodb+srv://<usuario>:<password>@<cluster>.mongodb.net/<basededatos>
-JWT_SECRET=una_clave_secreta_cualquiera
+JWT_SECRET=una_clave_secreta_larga_y_dificil_de_adivinar
+JWT_EXPIRES_IN=1h
 ```
 
 | Variable | Descripción |
 |---|---|
 | `PORT` | Puerto en el que corre el servidor |
-| `NODE_ENV` | Entorno de ejecución (`development` / `production`) |
+| `NODE_ENV` | Entorno de ejecución (`development` / `production`). En `production`, la cookie de sesión exige HTTPS |
 | `MONGO_URL` | Cadena de conexión a MongoDB Atlas |
-| `JWT_SECRET` | Clave que se usará para firmar sesiones más adelante |
+| `JWT_SECRET` | Clave secreta con la que se firman los JWT. Nunca se escribe en el código, solo acá |
+| `JWT_EXPIRES_IN` | Cuánto dura un token antes de vencer (formato tipo `1h`, `15m`, `7d`) |
 
 El archivo `.env` nunca se sube al repositorio — está excluido en `.gitignore`. `.env.example` queda como guía de qué configurar.
 
@@ -109,11 +115,13 @@ aura-events/
 │   │   └── Event.js
 │   ├── middlewares/
 │   │   ├── notFound.middleware.js
-│   │   └── errorHandler.middleware.js
+│   │   ├── errorHandler.middleware.js
+│   │   └── auth.middleware.js        # protege rutas leyendo y verificando el JWT de la cookie
 │   ├── utils/
 │   │   ├── asyncHandler.js
 │   │   ├── appError.js              # errores con status code (400, 409, etc.)
-│   │   └── hash.js                  # hashPassword / comparePassword (bcrypt)
+│   │   ├── hash.js                  # hashPassword / comparePassword (bcrypt)
+│   │   └── jwt.js                   # signToken / verifyToken (JWT)
 │   ├── app.js                 # arma la aplicación de Express (sin levantarla)
 │   └── server.js              # valida el entorno, conecta la base y levanta el servidor
 ├── .env.example
@@ -138,8 +146,11 @@ Cada capa hace una sola cosa: el router solo conecta una URL con su controlador,
 |---|---|---|---|
 | `GET` | `/api/health` | Confirma que el servidor está activo | `{ "status": "ok", "message": "Servidor activo" }` |
 | `GET` | `/api/events` | Lista los eventos existentes (vacía por ahora) | `{ "status": "success", "payload": [] }` |
-| `GET` | `/api/sessions` | Confirma que la ruta está preparada | Mensaje indicando que el login llega en una próxima entrega |
+| `GET` | `/api/sessions` | Confirma que el módulo de sesiones está activo | `{ "status": "success", "message": "..." }` |
 | `POST` | `/api/sessions/register` | Registra un usuario nuevo | Ver detalle abajo |
+| `POST` | `/api/sessions/login` | Inicia sesión y setea la cookie de autenticación | Ver detalle abajo |
+| `GET` | `/api/sessions/current` | Devuelve los datos del usuario autenticado (ruta protegida) | Ver detalle abajo |
+| `POST` | `/api/sessions/logout` | Cierra la sesión (borra la cookie) | Ver detalle abajo |
 
 ---
 
@@ -212,18 +223,118 @@ Notá que el email quedó normalizado (minúsculas, sin espacios) y que **no apa
 
 ---
 
+## Autenticación — login, current y logout
+
+### `POST /api/sessions/login`
+
+**Campos que espera:**
+
+| Campo | Tipo | Reglas |
+|---|---|---|
+| `email` | string | Obligatorio |
+| `password` | string | Obligatorio |
+
+**Ejemplo de petición:**
+
+```json
+POST /api/sessions/login
+Content-Type: application/json
+
+{
+  "email": "ana@mail.com",
+  "password": "Secreta123"
+}
+```
+
+**Respuesta 200 — login correcto** (además, la respuesta trae en sus headers un `Set-Cookie` con el JWT, `httpOnly`, que el navegador va a reenviar automáticamente en cada petición siguiente):
+
+```json
+{
+  "status": "success",
+  "message": "Login correcto"
+}
+```
+
+**Respuesta 401 — credenciales inválidas** (se usa el mismo mensaje tanto si el email no existe como si la contraseña está mal, a propósito — ver el comentario en `sessions.service.js` para la explicación completa de por qué):
+
+```json
+{
+  "status": "error",
+  "message": "Credenciales inválidas"
+}
+```
+
+---
+
+### `GET /api/sessions/current`
+
+Ruta protegida: antes de llegar al controlador, pasa por el middleware `auth`, que lee la cookie `currentUser`, verifica que el JWT adentro sea válido y no haya vencido, y recién ahí deja pasar la petición.
+
+**Respuesta 200 — con una cookie de sesión válida:**
+
+```json
+{
+  "status": "success",
+  "payload": {
+    "id": "665f2a...",
+    "email": "ana@mail.com",
+    "role": "user"
+  }
+}
+```
+
+**Respuesta 401 — sin cookie, o con un token inválido/vencido:**
+
+```json
+{
+  "status": "error",
+  "message": "No autenticado"
+}
+```
+
+---
+
+### `POST /api/sessions/logout`
+
+No espera ningún campo en el body. Borra la cookie `currentUser` del navegador.
+
+**Respuesta 200:**
+
+```json
+{
+  "status": "success",
+  "message": "Sesión cerrada"
+}
+```
+
+---
+
+### Cómo probar el flujo completo (con Thunder Client)
+
+Un detalle importante: Thunder Client (como cualquier cliente HTTP normal) guarda las cookies automáticamente entre peticiones dentro de la misma "Collection", igual que haría un navegador — así que no hace falta copiar el token a mano de un lado a otro.
+
+1. **Registrate** con `POST /api/sessions/register` (como en la sección anterior), si todavía no tenés un usuario de prueba.
+2. **Login** con `POST /api/sessions/login`, usando ese mismo email y contraseña → esperás `200` y, en la pestaña "Cookies" de la respuesta en Thunder Client, deberías ver `currentUser` con un valor largo (el JWT).
+3. **`GET /api/sessions/current`** → esperás `200` con tus datos (`id`, `email`, `role`), sin `password` en ningún lado.
+4. **`POST /api/sessions/logout`** → esperás `200`.
+5. **`GET /api/sessions/current`** otra vez → ahora esperás `401`, porque la cookie ya se borró.
+
+Otros casos para probar:
+- **Login con un email que no existe** → `401`, mensaje genérico `"Credenciales inválidas"`.
+- **Login con la contraseña incorrecta** (de un usuario que sí existe) → `401`, el mismo mensaje genérico.
+- **`/current` sin haber hecho login nunca** (o en una request nueva, sin cookies guardadas) → `401`.
+- **`/current` con un token manipulado**: si querés probar esto a mano, copiá el valor de la cookie después de un login y cambiale un carácter cualquiera antes de mandarlo — la firma deja de coincidir y debería dar `401` igual.
+
+---
+
 ## Notas adicionales
 
 El objetivo de este proyecto es ir creciendo entrega a entrega sobre la misma base, sin reordenar nada de lo ya construido. Lo que falta para las próximas entregas:
 
-- Login, JWT, cookies y Passport
-- Ruta `current` para saber quién es el usuario logueado
-- Roles y autorización sobre las rutas
+- Roles y autorización sobre las rutas (por ejemplo, que solo un `organizer` pueda crear eventos)
 - CRUD completo de eventos
 - Inscripciones, control de cupos y tickets
 
 ---
 
 Desarrollado por Vanesa como parte del curso de Backend II.
-
-
