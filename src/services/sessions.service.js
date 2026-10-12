@@ -9,7 +9,6 @@
 
 import UsersRepository from '../repositories/users.repository.js';
 import { hashPassword, comparePassword } from '../utils/hash.js';
-import { signToken } from '../utils/jwt.js';
 import { AppError } from '../utils/appError.js';
 
 const repository = new UsersRepository();
@@ -150,15 +149,27 @@ class SessionsService {
   }
 
   // ========================================================================
-  // LOGIN
+  // VALIDACIÓN DE CREDENCIALES (login)
   // ========================================================================
   //
-  // Devuelve un JWT firmado si el email y la contraseña son correctos.
-  // No devuelve datos del usuario acá — el controller se encarga de
-  // guardar este token en una cookie, y quien quiera saber quién es el
-  // usuario autenticado lo averigua llamando a GET /api/sessions/current
-  // (ahí sí se devuelven los datos, tomados del propio token).
-  async loginUser({ email, password }) {
+  // Antes de la Pre-entrega 4, este método se llamaba "loginUser" y
+  // además de validar las credenciales, generaba el JWT. Ahora, con
+  // Passport, esa segunda responsabilidad se saca de acá: este método
+  // SOLO valida que el email y la contraseña correspondan a un usuario
+  // real, y devuelve ese usuario (el documento completo de Mongoose, tal
+  // cual lo trajo la base de datos, con su password hasheado adentro).
+  //
+  // ¿Por qué el cambio? Porque la Pre-entrega 4 pide explícitamente que
+  // "el controller (no la estrategia) genere el JWT". Si este método
+  // siguiera firmando el token, la estrategia 'login' de Passport
+  // (que es quien llama a este método) terminaría generando el JWT de
+  // forma indirecta, violando esa regla. Separar "validar quién sos" de
+  // "armar tu token de sesión" también es, en términos generales, una
+  // separación de responsabilidades más prolija: este service no
+  // necesita saber nada sobre JWT, cookies, ni cómo se representa una
+  // sesión — eso es tema de la capa de autenticación (Passport) y del
+  // controller, no del negocio de "validar un usuario".
+  async validateCredentials({ email, password }) {
     // --- Paso 1: validar que vengan ambos campos ---
     // Esto es una validación de formato de la petición ("mandaste un
     // JSON incompleto"), no una validación de identidad. Por eso usa
@@ -211,19 +222,17 @@ class SessionsService {
       throw new AppError('Credenciales inválidas', 401);
     }
 
-    // --- Paso 4: generar el JWT ---
-    // El payload lleva solo lo mínimo necesario para identificar al
-    // usuario y saber su rol — nunca la contraseña (ni su hash), según
-    // pide explícitamente la consigna. user._id es un ObjectId de
-    // Mongoose, así que lo convertimos a texto plano con .toString()
-    // para que quede como un dato simple dentro del token.
-    const token = signToken({
-      id: user._id.toString(),
-      email: user.email,
-      role: user.role,
-    });
-
-    return token;
+    // --- Paso 4: devolver el usuario ---
+    // A diferencia de registerUser, acá SÍ devolvemos el documento tal
+    // cual, password hasheado incluido. No es un error: quien llama a
+    // este método (la estrategia 'login' de Passport, ver
+    // config/passport.config.js) necesita el _id, el email y el role
+    // para poder armar el JWT, y esa capa es de total confianza interna
+    // — nunca se expone al cliente. El controller es quien decide,
+    // explícitamente, qué campos del usuario viajan en el JWT (nunca el
+    // password), y la respuesta HTTP del login no incluye el usuario en
+    // ningún momento, solo el mensaje de éxito.
+    return user;
   }
 }
 
