@@ -15,7 +15,9 @@ La Pre-entrega 1 estableció la base arquitectónica del backend: un servidor Ex
 
 La Pre-entrega 2 sumó el primer flujo real de usuarios: el registro seguro, con validaciones, contraseñas protegidas con bcrypt y persistencia en MongoDB. Tras la corrección se afinaron dos detalles: ahora se rechaza un nombre compuesto solo por espacios en blanco, y un posible choque de emails duplicados ocurridos casi al mismo instante (registros simultáneos) también se maneja de forma prolija (409), en vez de terminar en un error de servidor (500).
 
-La Pre-entrega 3 suma la autenticación completa: login, generación de JWT, una cookie de sesión `httpOnly`, una ruta protegida para saber quién es el usuario autenticado, y logout.
+La Pre-entrega 3 sumó la autenticación completa: login, generación de JWT, una cookie de sesión `httpOnly`, una ruta protegida para saber quién es el usuario autenticado, y logout. Tras la corrección se ajustó un detalle: la duración de la cookie de sesión ahora se calcula automáticamente a partir de `JWT_EXPIRES_IN`, en vez de estar escrita a mano por separado — así token y cookie quedan siempre sincronizados.
+
+La Pre-entrega 4 no agrega funcionalidad nueva de cara afuera (las rutas y las respuestas son exactamente las mismas): refactoriza la organización interna de la autenticación para que pase por **Passport.js**, centralizando en un único archivo (`src/config/passport.config.js`) la lógica de registro, login y verificación de la sesión actual. Esto deja el proyecto preparado para, en una entrega futura, sumar proveedores externos de login (Google, GitHub, etc.) sin tener que tocar `app.js` ni las rutas existentes.
 
 ---
 
@@ -31,6 +33,9 @@ La Pre-entrega 3 suma la autenticación completa: login, generación de JWT, una
 | bcryptjs | Hasheo seguro de contraseñas |
 | jsonwebtoken | Generación y verificación de JWT |
 | cookie-parser | Lectura de cookies en las peticiones |
+| passport | Organización de la autenticación en estrategias reutilizables |
+| passport-custom | Estrategia de Passport con control total sobre la validación (en vez de depender del formato fijo de usuario/contraseña de `passport-local`) |
+| ms | Convierte strings tipo `"1h"` o `"15m"` a milisegundos, para que la cookie de sesión dure lo mismo que el JWT |
 
 ---
 
@@ -92,18 +97,19 @@ aura-events/
 ├── src/
 │   ├── config/
 │   │   ├── env.config.js      # valida que estén todas las variables necesarias
-│   │   └── db.js              # conexión a MongoDB
+│   │   ├── db.js              # conexión a MongoDB
+│   │   └── passport.config.js # estrategias 'register', 'login' y 'current', centralizadas
 │   ├── routes/
 │   │   ├── health.router.js
 │   │   ├── events.router.js
-│   │   └── sessions.router.js
+│   │   └── sessions.router.js       # las rutas de auth delegan en passport.authenticate(...)
 │   ├── controllers/
 │   │   ├── health.controller.js
 │   │   ├── events.controller.js
-│   │   └── sessions.controller.js
+│   │   └── sessions.controller.js   # genera el JWT y setea la cookie tras el login
 │   ├── services/
 │   │   ├── events.service.js
-│   │   └── sessions.service.js      # lógica del registro de usuarios
+│   │   └── sessions.service.js      # registerUser y validateCredentials (sin saber nada de JWT)
 │   ├── repositories/
 │   │   ├── events.repository.js
 │   │   └── users.repository.js
@@ -115,14 +121,13 @@ aura-events/
 │   │   └── Event.js
 │   ├── middlewares/
 │   │   ├── notFound.middleware.js
-│   │   ├── errorHandler.middleware.js
-│   │   └── auth.middleware.js        # protege rutas leyendo y verificando el JWT de la cookie
+│   │   └── errorHandler.middleware.js
 │   ├── utils/
 │   │   ├── asyncHandler.js
 │   │   ├── appError.js              # errores con status code (400, 409, etc.)
 │   │   ├── hash.js                  # hashPassword / comparePassword (bcrypt)
 │   │   └── jwt.js                   # signToken / verifyToken (JWT)
-│   ├── app.js                 # arma la aplicación de Express (sin levantarla)
+│   ├── app.js                 # arma la aplicación de Express e inicializa Passport (sin levantarla)
 │   └── server.js              # valida el entorno, conecta la base y levanta el servidor
 ├── .env.example
 ├── .gitignore
@@ -225,6 +230,22 @@ Notá que el email quedó normalizado (minúsculas, sin espacios) y que **no apa
 
 ## Autenticación — login, current y logout
 
+### Organización interna con Passport.js
+
+Desde la Pre-entrega 4, toda la autenticación pasa por **tres estrategias de Passport**, centralizadas en `src/config/passport.config.js`. El contrato externo (rutas, status codes, forma de las respuestas) es idéntico al de la Pre-entrega 3 — lo que cambió es cómo está organizado el código por dentro:
+
+| Estrategia | Se usa en | Qué hace |
+|---|---|---|
+| `register` | `POST /api/sessions/register` | Llama a `sessionsService.registerUser()`: valida los campos, normaliza el email, hashea la contraseña y rechaza duplicados. Si todo sale bien, deja el usuario recién creado en `req.user` |
+| `login` | `POST /api/sessions/login` | Llama a `sessionsService.validateCredentials()`: valida que el email y la contraseña correspondan a un usuario real, con el mismo mensaje genérico (`"Credenciales inválidas"`) tanto si el email no existe como si la contraseña está mal. Deja el usuario autenticado en `req.user` — **no genera ningún token acá** |
+| `current` | `GET /api/sessions/current` | Lee la cookie `currentUser`, verifica que el JWT sea válido y no haya vencido, y deja el payload decodificado en `req.user`. Reemplaza al middleware manual `auth.middleware.js` que existía en la Pre-entrega 3 |
+
+El `POST /api/sessions/logout` es la única ruta de sesiones que **no** pasa por Passport: cerrar sesión es simplemente borrar una cookie, no hay ninguna identidad que verificar.
+
+Un detalle de diseño importante, pedido explícitamente por la consigna: **el JWT se genera en el controller (`sessions.controller.js`), nunca dentro de una estrategia**. Las estrategias solo responden "¿quién sos / sos quién decís ser?"; qué hacer con esa identidad ya confirmada (firmar un token, guardarlo en una cookie) es una decisión de la capa HTTP, no de la autenticación en sí.
+
+`app.js` solo inicializa Passport (`passport.initialize()`) — no define ninguna estrategia. Eso significa que, para sumar un login con Google o GitHub en una entrega futura, alcanza con agregar una nueva estrategia en `passport.config.js`; no hace falta tocar `app.js` ni ninguna ruta existente.
+
 ### `POST /api/sessions/login`
 
 **Campos que espera:**
@@ -268,7 +289,7 @@ Content-Type: application/json
 
 ### `GET /api/sessions/current`
 
-Ruta protegida: antes de llegar al controlador, pasa por el middleware `auth`, que lee la cookie `currentUser`, verifica que el JWT adentro sea válido y no haya vencido, y recién ahí deja pasar la petición.
+Ruta protegida: antes de llegar al controlador, pasa por la estrategia `current` de Passport (ver tabla arriba), que lee la cookie `currentUser`, verifica que el JWT adentro sea válido y no haya vencido, y recién ahí deja pasar la petición.
 
 **Respuesta 200 — con una cookie de sesión válida:**
 
@@ -327,13 +348,34 @@ Otros casos para probar:
 
 ---
 
+## Preparado para proveedores externos
+
+El archivo `src/config/passport.config.js` está armado para poder sumar nuevas estrategias sin reorganizar nada de lo existente. Por ejemplo, un login con Google se agregaría así, en ese mismo archivo:
+
+```js
+passport.use('google', new GoogleStrategy({ /* credenciales de Google */ }, verifyCallback));
+```
+
+Y la ruta correspondiente se vería igual de simple que las actuales:
+
+```js
+router.get('/google', passport.authenticate('google', { session: false }));
+```
+
+No hace falta tocar `app.js` (ya tiene `passport.initialize()`) ni modificar ninguna de las rutas de sesiones que ya existen.
+
+---
+
 ## Notas adicionales
 
 El objetivo de este proyecto es ir creciendo entrega a entrega sobre la misma base, sin reordenar nada de lo ya construido. Lo que falta para las próximas entregas:
 
+- Login con proveedores externos (Google, GitHub) usando la estructura que ya dejó preparada Passport
 - Roles y autorización sobre las rutas (por ejemplo, que solo un `organizer` pueda crear eventos)
 - CRUD completo de eventos
 - Inscripciones, control de cupos y tickets
+
+En cada endpoint nuevo que se agregue de acá en adelante se mantiene el mismo patrón ya establecido: nunca se expone `password` en ninguna respuesta, y nunca se acepta `role` (ni ningún otro campo sensible) directamente desde el body de la petición.
 
 ---
 
