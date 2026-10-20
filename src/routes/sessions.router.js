@@ -9,6 +9,7 @@
 
 import { Router } from 'express';
 import passport from '../config/passport.config.js';
+import { authenticate } from '../middlewares/auth.middleware.js';
 import {
   sessionsPlaceholder,
   register,
@@ -31,9 +32,11 @@ router.post('/register', passport.authenticate('register', { session: false }), 
 // JWT y lo guarda en la cookie.
 router.post('/login', passport.authenticate('login', { session: false }), login);
 
-// Ruta protegida. La estrategia 'current' lee y valida la cookie
-// "currentUser"; si es válida, deja el payload del token en req.user.
-router.get('/current', passport.authenticate('current', { session: false }), current);
+// Ruta protegida. El middleware authenticate (que usa la estrategia
+// 'current' de Passport) lee y valida la cookie "currentUser"; si es
+// válida, deja el payload del token en req.user. Es el mismo middleware
+// que protege las rutas de eventos y de usuarios.
+router.get('/current', authenticate, current);
 
 // Logout no pasa por Passport: no hay nada que autenticar para borrar
 // una cookie.
