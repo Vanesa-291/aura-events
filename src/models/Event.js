@@ -26,11 +26,24 @@ const eventSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
-    // Referencia al usuario que organiza el evento. Todavía no se usa en
-    // ningún lado, pero la dejamos preparada para cuando exista el login.
+    // Referencia al usuario que organiza el evento. Desde la Pre-entrega 5
+    // se usa de verdad: es el dato que permite saber de quién es cada
+    // evento, y por lo tanto decidir si un organizer puede modificarlo
+    // (solo los suyos) o no. Siempre lo completa el servidor con el id
+    // del usuario autenticado; nunca viene del body.
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
+    },
+    // Estado del evento. 'published' es un evento visible para todos;
+    // 'cancelled' es un evento que su organizador (o un admin) dio de
+    // baja y que deja de aparecer en el listado público. En vez de
+    // borrarlo de la base, lo marcamos como cancelado, así queda el
+    // registro de que existió.
+    status: {
+      type: String,
+      enum: ['published', 'cancelled'],
+      default: 'published',
     },
   },
   { timestamps: true }
