@@ -19,6 +19,8 @@ La Pre-entrega 3 sumó la autenticación completa: login, generación de JWT, un
 
 La Pre-entrega 4 no agrega funcionalidad nueva de cara afuera (las rutas y las respuestas son exactamente las mismas): refactoriza la organización interna de la autenticación para que pase por **Passport.js**, centralizando en un único archivo (`src/config/passport.config.js`) la lógica de registro, login y verificación de la sesión actual. Esto deja el proyecto preparado para, en una entrega futura, sumar proveedores externos de login (Google, GitHub, etc.) sin tener que tocar `app.js` ni las rutas existentes.
 
+La Pre-entrega 5 suma **roles y autorización**: ya no alcanza con iniciar sesión, cada acción se valida según el rol del usuario (`user`, `organizer` o `admin`). Hay una matriz de permisos definida en un solo lugar, dos middlewares reutilizables (uno que responde **401** si no hay sesión y otro que responde **403** si el rol no alcanza), rutas protegidas para crear y gestionar eventos, una ruta administrativa, y una regla de propiedad: un organizer solo puede modificar o cancelar sus propios eventos.
+
 ---
 
 ## Tecnologías utilizadas
@@ -86,6 +88,12 @@ npm start       # modo normal
 npm run dev     # se reinicia solo al guardar cambios
 ```
 
+Y una herramienta de administración para asignar roles (ver la sección [Roles y autorización](#roles-y-autorización)):
+
+```bash
+npm run set-role -- ana@mail.com organizer
+```
+
 El servidor queda disponible en `http://localhost:8080` (o el puerto que hayas configurado).
 
 ---
@@ -98,17 +106,21 @@ aura-events/
 │   ├── config/
 │   │   ├── env.config.js      # valida que estén todas las variables necesarias
 │   │   ├── db.js              # conexión a MongoDB
-│   │   └── passport.config.js # estrategias 'register', 'login' y 'current', centralizadas
+│   │   ├── passport.config.js # estrategias 'register', 'login' y 'current', centralizadas
+│   │   └── roles.config.js    # ROLES y PERMISSIONS: la matriz de permisos en código
 │   ├── routes/
 │   │   ├── health.router.js
-│   │   ├── events.router.js
+│   │   ├── events.router.js         # rutas de eventos, con authenticate + authorize
+│   │   ├── users.router.js          # ruta administrativa (solo admin)
 │   │   └── sessions.router.js       # las rutas de auth delegan en passport.authenticate(...)
 │   ├── controllers/
 │   │   ├── health.controller.js
 │   │   ├── events.controller.js
+│   │   ├── users.controller.js
 │   │   └── sessions.controller.js   # genera el JWT y setea la cookie tras el login
 │   ├── services/
-│   │   ├── events.service.js
+│   │   ├── events.service.js        # validaciones de eventos y regla de propiedad
+│   │   ├── users.service.js
 │   │   └── sessions.service.js      # registerUser y validateCredentials (sin saber nada de JWT)
 │   ├── repositories/
 │   │   ├── events.repository.js
@@ -120,6 +132,8 @@ aura-events/
 │   │   ├── User.js                  # first_name, last_name, email, password, role
 │   │   └── Event.js
 │   ├── middlewares/
+│   │   ├── auth.middleware.js       # authenticate: valida el JWT de la cookie → 401
+│   │   ├── authorize.middleware.js  # authorize(...roles): compara el rol → 403
 │   │   ├── notFound.middleware.js
 │   │   └── errorHandler.middleware.js
 │   ├── utils/
@@ -129,6 +143,8 @@ aura-events/
 │   │   └── jwt.js                   # signToken / verifyToken (JWT)
 │   ├── app.js                 # arma la aplicación de Express e inicializa Passport (sin levantarla)
 │   └── server.js              # valida el entorno, conecta la base y levanta el servidor
+├── scripts/
+│   └── set-role.js            # herramienta de línea de comandos para asignar roles
 ├── .env.example
 ├── .gitignore
 ├── package.json
@@ -150,7 +166,11 @@ Cada capa hace una sola cosa: el router solo conecta una URL con su controlador,
 | Método | Ruta | Descripción | Respuesta |
 |---|---|---|---|
 | `GET` | `/api/health` | Confirma que el servidor está activo | `{ "status": "ok", "message": "Servidor activo" }` |
-| `GET` | `/api/events` | Lista los eventos existentes (vacía por ahora) | `{ "status": "success", "payload": [] }` |
+| `GET` | `/api/events` | Lista los eventos publicados (los cancelados no aparecen). Pública | `{ "status": "success", "payload": [...] }` |
+| `POST` | `/api/events` | Crea un evento. Solo `organizer` o `admin` | Ver [Roles y autorización](#roles-y-autorización) |
+| `PATCH` | `/api/events/:id` | Modifica un evento. `organizer` (solo los suyos) o `admin` (cualquiera) | Ver [Roles y autorización](#roles-y-autorización) |
+| `PATCH` | `/api/events/:id/cancel` | Cancela un evento. `organizer` (solo los suyos) o `admin` (cualquiera) | Ver [Roles y autorización](#roles-y-autorización) |
+| `GET` | `/api/users` | Lista todos los usuarios, sin contraseñas. Solo `admin` | Ver [Roles y autorización](#roles-y-autorización) |
 | `GET` | `/api/sessions` | Confirma que el módulo de sesiones está activo | `{ "status": "success", "message": "..." }` |
 | `POST` | `/api/sessions/register` | Registra un usuario nuevo | Ver detalle abajo |
 | `POST` | `/api/sessions/login` | Inicia sesión y setea la cookie de autenticación | Ver detalle abajo |
@@ -348,6 +368,147 @@ Otros casos para probar:
 
 ---
 
+## Roles y autorización
+
+Hasta la Pre-entrega 4 la API sabía **quién** era cada usuario (autenticación). Desde la Pre-entrega 5 también decide **qué puede hacer** (autorización), según su rol.
+
+### Roles
+
+| Rol | Para qué sirve |
+|---|---|
+| `user` | Usuario común. Es el rol por defecto de todo el que se registra. Puede consultar los eventos publicados |
+| `organizer` | Organiza eventos: puede crear eventos y modificar o cancelar **los suyos** |
+| `admin` | Control total: puede modificar o cancelar **cualquier** evento y ver todos los usuarios |
+
+El campo `role` del modelo `User` acepta únicamente estos tres valores (`enum`) y por defecto vale `user`.
+
+### Matriz de permisos
+
+| Acción | user | organizer | admin |
+|---|:---:|:---:|:---:|
+| Consultar eventos publicados | ✅ | ✅ | ✅ |
+| Crear eventos | ❌ | ✅ | ✅ |
+| Modificar/cancelar eventos propios | ❌ | ✅ | ✅ |
+| Modificar cualquier evento | ❌ | ❌ | ✅ |
+| Ver todos los usuarios | ❌ | ❌ | ✅ |
+
+Esta tabla también existe **en código**, en `src/config/roles.config.js` (`ROLES` y `PERMISSIONS`). Las rutas no tienen los roles escritos a mano: usan `authorize(...PERMISSIONS.CREATE_EVENT)`, por lo que si una regla cambia, se cambia en un solo lugar.
+
+### Cómo se asignan los roles
+
+- **El registro público nunca permite elegir el rol.** `POST /api/sessions/register` ignora cualquier `role` que venga en el body: todos entran como `user`. Así nadie puede auto-asignarse `admin` u `organizer`.
+- Los roles `organizer` y `admin` los asigna quien administra el servidor con una herramienta de línea de comandos, **no con un endpoint de la API**:
+
+  ```bash
+  npm run set-role -- ana@mail.com organizer
+  npm run set-role -- ana@mail.com admin
+  ```
+
+  La persona tiene que estar registrada antes. Después del cambio tiene que **volver a hacer login**: el rol viaja dentro del JWT, y el token anterior conserva el rol viejo hasta que vence (`JWT_EXPIRES_IN`).
+
+### Los dos middlewares
+
+Están separados del código de las rutas y se usan siempre en este orden:
+
+```js
+router.post('/', authenticate, authorize(...PERMISSIONS.CREATE_EVENT), asyncHandler(createEvent));
+```
+
+| Middleware | Archivo | Qué hace | Si falla |
+|---|---|---|---|
+| `authenticate` | `src/middlewares/auth.middleware.js` | Lee el JWT de la cookie `currentUser` (con la estrategia `current` de Passport), lo valida y deja `{ id, email, role }` en `req.user` | **401** `No autenticado` |
+| `authorize(...roles)` | `src/middlewares/authorize.middleware.js` | Recibe los roles permitidos y los compara contra `req.user.role` | **403** `No tenés permisos para realizar esta acción` |
+
+### Diferencia entre 401 y 403
+
+| Código | Significa | Cuándo pasa | Mensaje |
+|---|---|---|---|
+| **401** Unauthorized | **No sabemos quién sos** | No hay cookie, el token es inválido, fue manipulado o venció | `No autenticado` |
+| **403** Forbidden | **Sabemos quién sos, pero no tenés permiso** | Hay sesión válida, pero tu rol no alcanza (o el evento no es tuyo) | `No tenés permisos para realizar esta acción` / `No tenés permisos sobre este evento` |
+
+La idea para recordarlo: el **401** se arregla iniciando sesión; el **403** no se arregla iniciando sesión, porque ya estás adentro y simplemente esa acción no te corresponde. Ninguno de los dos casos responde 500: el 500 queda reservado para errores reales e inesperados del servidor.
+
+### Rutas protegidas
+
+| Ruta | Quién puede | Sin sesión | Con sesión pero sin permiso |
+|---|---|---|---|
+| `GET /api/sessions/current` | Cualquier usuario autenticado | 401 | — |
+| `POST /api/events` | `organizer`, `admin` | 401 | 403 (si es `user`) |
+| `PATCH /api/events/:id` | `organizer` (solo sus eventos), `admin` | 401 | 403 (si es `user`, o si el evento es de otro organizer) |
+| `PATCH /api/events/:id/cancel` | `organizer` (solo sus eventos), `admin` | 401 | 403 (si es `user`, o si el evento es de otro organizer) |
+| `GET /api/users` *(ruta administrativa)* | `admin` | 401 | 403 (si es `user` u `organizer`) |
+
+`GET /api/events` sigue siendo pública: cualquiera puede consultar los eventos publicados.
+
+### Propiedad de los eventos
+
+Hay dos niveles de control y conviene no confundirlos:
+
+1. **Por rol**, en el middleware `authorize`: ¿un `user` puede modificar eventos? No → 403, y el controlador ni se ejecuta.
+2. **Por propiedad**, en el service de eventos: ¿este organizer es el dueño de **este** evento? Eso no se puede decidir en un middleware genérico porque hace falta consultar el evento en la base de datos para saber de quién es. Un `organizer` solo puede modificar o cancelar los eventos cuyo `createdBy` es su propio id; un `admin` puede con cualquiera. Si no corresponde → 403 `No tenés permisos sobre este evento`.
+
+El campo `createdBy` siempre lo completa el servidor con el id que sale del JWT. Nunca se acepta desde el body, igual que `status`: si llegan en la petición, se ignoran. Un evento cancelado queda guardado con `status: "cancelled"` (no se borra), deja de aparecer en el listado público y ya no se puede modificar.
+
+### Ejemplos de respuestas
+
+**`POST /api/events` con rol `user` → 403:**
+
+```json
+{ "status": "error", "message": "No tenés permisos para realizar esta acción" }
+```
+
+**`POST /api/events` con rol `organizer` o `admin` → 201** (body de la petición: `title`, `description`, `date`, `location`, `capacity`):
+
+```json
+{
+  "status": "success",
+  "payload": {
+    "_id": "6690...",
+    "title": "Congreso Tech 2026",
+    "description": "Charlas y talleres",
+    "date": "2026-12-01T10:00:00.000Z",
+    "location": "Mendoza",
+    "capacity": 100,
+    "createdBy": "665f2a...",
+    "status": "published"
+  }
+}
+```
+
+**Cualquier ruta privada sin cookie → 401:**
+
+```json
+{ "status": "error", "message": "No autenticado" }
+```
+
+**`PATCH /api/events/:id` de un organizer sobre un evento ajeno → 403:**
+
+```json
+{ "status": "error", "message": "No tenés permisos sobre este evento" }
+```
+
+Otros errores de los endpoints de eventos: `400` (faltan campos, fecha inválida, capacidad que no sea un entero mayor a 0, id con formato inválido), `404` (el evento no existe) y `409` (cancelar un evento que ya está cancelado, o modificar uno cancelado).
+
+### Cómo probar los casos (con Thunder Client)
+
+Thunder Client guarda una sola cookie `currentUser` por vez: para cambiar de usuario basta con hacer login con el otro, que reemplaza la cookie anterior.
+
+1. Registrá tres usuarios con `POST /api/sessions/register` (por ejemplo `user@mail.com`, `organizer@mail.com` y `admin@mail.com`).
+2. Asignales el rol desde la terminal del proyecto:
+   ```bash
+   npm run set-role -- organizer@mail.com organizer
+   npm run set-role -- admin@mail.com admin
+   ```
+3. Casos a verificar:
+   - **Sin cookie** (sin haber hecho login, o después de `logout`): `POST /api/events` → `401`.
+   - Login como `user` → `POST /api/events` → `403`.
+   - Login como `organizer` → `POST /api/events` → `201` (guardá el `_id` que devuelve).
+   - Como `organizer`: `GET /api/users` → `403`.
+   - Login como `admin` → `GET /api/users` → `200`, sin ninguna contraseña en la lista.
+   - Con un segundo organizer, intentar `PATCH /api/events/:id` sobre el evento del primero → `403`. Con el admin, el mismo `PATCH` → `200`.
+
+---
+
 ## Preparado para proveedores externos
 
 El archivo `src/config/passport.config.js` está armado para poder sumar nuevas estrategias sin reorganizar nada de lo existente. Por ejemplo, un login con Google se agregaría así, en ese mismo archivo:
@@ -371,8 +532,7 @@ No hace falta tocar `app.js` (ya tiene `passport.initialize()`) ni modificar nin
 El objetivo de este proyecto es ir creciendo entrega a entrega sobre la misma base, sin reordenar nada de lo ya construido. Lo que falta para las próximas entregas:
 
 - Login con proveedores externos (Google, GitHub) usando la estructura que ya dejó preparada Passport
-- Roles y autorización sobre las rutas (por ejemplo, que solo un `organizer` pueda crear eventos)
-- CRUD completo de eventos
+- CRUD completo de eventos (hoy se pueden listar, crear, modificar y cancelar)
 - Inscripciones, control de cupos y tickets
 
 En cada endpoint nuevo que se agregue de acá en adelante se mantiene el mismo patrón ya establecido: nunca se expone `password` en ninguna respuesta, y nunca se acepta `role` (ni ningún otro campo sensible) directamente desde el body de la petición.
