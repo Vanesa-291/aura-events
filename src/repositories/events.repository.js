@@ -11,6 +11,22 @@ class EventsRepository {
   async getAll() {
     return await dao.getAll();
   }
+
+  async getPublished() {
+    return await dao.getPublished();
+  }
+
+  async getById(id) {
+    return await dao.getById(id);
+  }
+
+  async create(eventData) {
+    return await dao.create(eventData);
+  }
+
+  async updateById(id, changes) {
+    return await dao.updateById(id, changes);
+  }
 }
 
 export default EventsRepository;
