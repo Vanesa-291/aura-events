@@ -14,6 +14,14 @@ class UsersDAO {
   async findByEmail(email) {
     return await User.findOne({ email });
   }
+
+  // Lista todos los usuarios SIN el campo password: .select('-password')
+  // le dice a MongoDB que no lo traiga. Es la primera barrera para que el
+  // hash de una contraseña nunca salga de la base en un listado; el
+  // service agrega una segunda barrera por las dudas.
+  async getAll() {
+    return await User.find().select('-password');
+  }
 }
 
 export default UsersDAO;

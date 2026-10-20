@@ -18,6 +18,10 @@ class UsersRepository {
   async findByEmail(email) {
     return await dao.findByEmail(email);
   }
+
+  async getAll() {
+    return await dao.getAll();
+  }
 }
 
 export default UsersRepository;
