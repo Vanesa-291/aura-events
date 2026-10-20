@@ -12,6 +12,7 @@ import passport from './config/passport.config.js';
 import healthRouter   from './routes/health.router.js';
 import eventsRouter    from './routes/events.router.js';
 import sessionsRouter  from './routes/sessions.router.js';
+import usersRouter     from './routes/users.router.js';
 
 import { notFound } from './middlewares/notFound.middleware.js';
 import { errorHandler } from './middlewares/errorHandler.middleware.js';
@@ -43,6 +44,7 @@ app.use(passport.initialize());
 app.use('/api/health',   healthRouter);
 app.use('/api/events',   eventsRouter);
 app.use('/api/sessions', sessionsRouter);
+app.use('/api/users',    usersRouter);
 
 // Si ninguna ruta anterior respondió, caemos acá.
 app.use(notFound);
