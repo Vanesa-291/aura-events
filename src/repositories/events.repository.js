@@ -12,12 +12,12 @@ class EventsRepository {
     return await dao.getAll();
   }
 
-  async getPublished() {
-    return await dao.getPublished();
-  }
-
   async getById(id) {
     return await dao.getById(id);
+  }
+
+  async findPaginated(filter, options) {
+    return await dao.findPaginated(filter, options);
   }
 
   async create(eventData) {

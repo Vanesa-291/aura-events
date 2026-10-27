@@ -9,17 +9,27 @@ class EventsDAO {
     return await Event.find();
   }
 
-  // Eventos visibles para el público: todos los que NO están cancelados.
-  // Usamos $ne ("distinto de") en vez de pedir status === 'published'
-  // para que también aparezcan los eventos que se hayan guardado antes de
-  // que existiera el campo "status" (esos documentos no tienen el campo,
-  // y una búsqueda por 'published' no los encontraría).
-  async getPublished() {
-    return await Event.find({ status: { $ne: 'cancelled' } });
-  }
-
   async getById(id) {
     return await Event.findById(id);
+  }
+
+  // Trae UNA página de eventos que cumplan el filtro, con el orden pedido,
+  // y además cuenta cuántos eventos cumplen el filtro en total (sin
+  // importar la página). Ese total es el que permite calcular cuántas
+  // páginas hay. Las dos consultas son independientes, así que se lanzan
+  // juntas con Promise.all.
+  //
+  //   filter → qué eventos buscar (ya armado y validado por el service)
+  //   sort   → por qué campos ordenar, por ejemplo { date: 1 }
+  //   skip   → cuántos eventos saltear (las páginas anteriores)
+  //   limit  → cuántos traer (tamaño de la página)
+  async findPaginated(filter, { sort, skip, limit }) {
+    const [items, total] = await Promise.all([
+      Event.find(filter).sort(sort).skip(skip).limit(limit),
+      Event.countDocuments(filter),
+    ]);
+
+    return { items, total };
   }
 
   async create(eventData) {
