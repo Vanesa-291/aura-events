@@ -21,6 +21,8 @@ La Pre-entrega 4 no agrega funcionalidad nueva de cara afuera (las rutas y las r
 
 La Pre-entrega 5 suma **roles y autorización**: ya no alcanza con iniciar sesión, cada acción se valida según el rol del usuario (`user`, `organizer` o `admin`). Hay una matriz de permisos definida en un solo lugar, dos middlewares reutilizables (uno que responde **401** si no hay sesión y otro que responde **403** si el rol no alcanza), rutas protegidas para crear y gestionar eventos, una ruta administrativa, y una regla de propiedad: un organizer solo puede modificar o cancelar sus propios eventos.
 
+La Pre-entrega 6 construye la **entidad central del proyecto: los eventos**. El modelo `Event` se completa (categoría, precio, estado y organizador como referencia a un usuario) y se arma el CRUD con reglas de negocio en la capa de services: no se crean eventos con fecha pasada, los estados solo cambian por caminos permitidos (un evento cancelado o finalizado no vuelve atrás), y cancelar nunca borra nada de la base de datos. El listado público ahora admite filtros (estado, categoría, lugar, rango de fechas), paginación y ordenamiento. Los eventos que antes se modificaban con `PATCH /api/events/:id` y `PATCH /api/events/:id/cancel` ahora se manejan con `PUT /api/events/:id` y `PATCH /api/events/:id/status`, como pide el contrato de esta entrega; el campo `createdBy` pasó a llamarse `organizer`.
+
 ---
 
 ## Tecnologías utilizadas
@@ -94,6 +96,12 @@ Y una herramienta de administración para asignar roles (ver la sección [Roles 
 npm run set-role -- ana@mail.com organizer
 ```
 
+Y, opcionalmente, una para cargar eventos de ejemplo y poder probar el listado con filtros y paginación (ver la sección [Eventos](#eventos--entidad-central-y-lógica-de-negocio)):
+
+```bash
+npm run seed-events -- ana@mail.com
+```
+
 El servidor queda disponible en `http://localhost:8080` (o el puerto que hayas configurado).
 
 ---
@@ -119,7 +127,7 @@ aura-events/
 │   │   ├── users.controller.js
 │   │   └── sessions.controller.js   # genera el JWT y setea la cookie tras el login
 │   ├── services/
-│   │   ├── events.service.js        # validaciones de eventos y regla de propiedad
+│   │   ├── events.service.js        # reglas de negocio de eventos: validaciones, estados, propiedad, filtros y paginación
 │   │   ├── users.service.js
 │   │   └── sessions.service.js      # registerUser y validateCredentials (sin saber nada de JWT)
 │   ├── repositories/
@@ -130,9 +138,9 @@ aura-events/
 │   │   └── users.dao.js
 │   ├── models/
 │   │   ├── User.js                  # first_name, last_name, email, password, role
-│   │   └── Event.js
+│   │   └── Event.js                 # title, description, category, date, location, capacity, price, status, organizer
 │   ├── middlewares/
-│   │   ├── auth.middleware.js       # authenticate: valida el JWT de la cookie → 401
+│   │   ├── auth.middleware.js       # authenticate (→ 401) y authenticateOptional (para rutas públicas)
 │   │   ├── authorize.middleware.js  # authorize(...roles): compara el rol → 403
 │   │   ├── notFound.middleware.js
 │   │   └── errorHandler.middleware.js
@@ -144,7 +152,8 @@ aura-events/
 │   ├── app.js                 # arma la aplicación de Express e inicializa Passport (sin levantarla)
 │   └── server.js              # valida el entorno, conecta la base y levanta el servidor
 ├── scripts/
-│   └── set-role.js            # herramienta de línea de comandos para asignar roles
+│   ├── set-role.js            # herramienta de línea de comandos para asignar roles
+│   └── seed-events.js         # carga eventos de ejemplo (opcional, para probar el listado)
 ├── .env.example
 ├── .gitignore
 ├── package.json
@@ -166,10 +175,11 @@ Cada capa hace una sola cosa: el router solo conecta una URL con su controlador,
 | Método | Ruta | Descripción | Respuesta |
 |---|---|---|---|
 | `GET` | `/api/health` | Confirma que el servidor está activo | `{ "status": "ok", "message": "Servidor activo" }` |
-| `GET` | `/api/events` | Lista los eventos publicados (los cancelados no aparecen). Pública | `{ "status": "success", "payload": [...] }` |
-| `POST` | `/api/events` | Crea un evento. Solo `organizer` o `admin` | Ver [Roles y autorización](#roles-y-autorización) |
-| `PATCH` | `/api/events/:id` | Modifica un evento. `organizer` (solo los suyos) o `admin` (cualquiera) | Ver [Roles y autorización](#roles-y-autorización) |
-| `PATCH` | `/api/events/:id/cancel` | Cancela un evento. `organizer` (solo los suyos) o `admin` (cualquiera) | Ver [Roles y autorización](#roles-y-autorización) |
+| `GET` | `/api/events` | Lista eventos con filtros, paginación y orden. Pública | `{ "status": "success", "data": [...], "page", "limit", "total", "totalPages" }` |
+| `GET` | `/api/events/:id` | Devuelve un evento. Pública (los borradores solo los ve su organizer o un admin) | `{ "status": "success", "payload": {...} }` |
+| `POST` | `/api/events` | Crea un evento. Solo `organizer` o `admin` | Ver [Eventos](#eventos--entidad-central-y-lógica-de-negocio) |
+| `PUT` | `/api/events/:id` | Modifica los datos de un evento. Dueño del evento o `admin` | Ver [Eventos](#eventos--entidad-central-y-lógica-de-negocio) |
+| `PATCH` | `/api/events/:id/status` | Cambia el estado de un evento (publicar, cancelar, finalizar). Dueño del evento o `admin` | Ver [Eventos](#eventos--entidad-central-y-lógica-de-negocio) |
 | `GET` | `/api/users` | Lista todos los usuarios, sin contraseñas. Solo `admin` | Ver [Roles y autorización](#roles-y-autorización) |
 | `GET` | `/api/sessions` | Confirma que el módulo de sesiones está activo | `{ "status": "success", "message": "..." }` |
 | `POST` | `/api/sessions/register` | Registra un usuario nuevo | Ver detalle abajo |
@@ -434,20 +444,20 @@ La idea para recordarlo: el **401** se arregla iniciando sesión; el **403** no 
 |---|---|---|---|
 | `GET /api/sessions/current` | Cualquier usuario autenticado | 401 | — |
 | `POST /api/events` | `organizer`, `admin` | 401 | 403 (si es `user`) |
-| `PATCH /api/events/:id` | `organizer` (solo sus eventos), `admin` | 401 | 403 (si es `user`, o si el evento es de otro organizer) |
-| `PATCH /api/events/:id/cancel` | `organizer` (solo sus eventos), `admin` | 401 | 403 (si es `user`, o si el evento es de otro organizer) |
+| `PUT /api/events/:id` | `organizer` (solo sus eventos), `admin` | 401 | 403 (si es `user`, o si el evento es de otro organizer) |
+| `PATCH /api/events/:id/status` | `organizer` (solo sus eventos), `admin` | 401 | 403 (si es `user`, o si el evento es de otro organizer) |
 | `GET /api/users` *(ruta administrativa)* | `admin` | 401 | 403 (si es `user` u `organizer`) |
 
-`GET /api/events` sigue siendo pública: cualquiera puede consultar los eventos publicados.
+`GET /api/events` y `GET /api/events/:id` son públicas: cualquiera puede consultar los eventos publicados, tenga o no sesión. La única excepción son los borradores (ver [Eventos](#eventos--entidad-central-y-lógica-de-negocio)).
 
 ### Propiedad de los eventos
 
 Hay dos niveles de control y conviene no confundirlos:
 
 1. **Por rol**, en el middleware `authorize`: ¿un `user` puede modificar eventos? No → 403, y el controlador ni se ejecuta.
-2. **Por propiedad**, en el service de eventos: ¿este organizer es el dueño de **este** evento? Eso no se puede decidir en un middleware genérico porque hace falta consultar el evento en la base de datos para saber de quién es. Un `organizer` solo puede modificar o cancelar los eventos cuyo `createdBy` es su propio id; un `admin` puede con cualquiera. Si no corresponde → 403 `No tenés permisos sobre este evento`.
+2. **Por propiedad**, en el service de eventos: ¿este organizer es el dueño de **este** evento? Eso no se puede decidir en un middleware genérico porque hace falta consultar el evento en la base de datos para saber de quién es. Un `organizer` solo puede modificar o cambiar de estado los eventos cuyo `organizer` es su propio id; un `admin` puede con cualquiera. Si no corresponde → 403 `No tenés permisos sobre este evento`.
 
-El campo `createdBy` siempre lo completa el servidor con el id que sale del JWT. Nunca se acepta desde el body, igual que `status`: si llegan en la petición, se ignoran. Un evento cancelado queda guardado con `status: "cancelled"` (no se borra), deja de aparecer en el listado público y ya no se puede modificar.
+El campo `organizer` siempre lo completa el servidor con el id que sale del JWT. Nunca se acepta desde el body: si llega en la petición, se ignora. Un evento cancelado queda guardado con `status: "cancelled"` (no se borra) y ya no se puede modificar.
 
 ### Ejemplos de respuestas
 
@@ -457,7 +467,7 @@ El campo `createdBy` siempre lo completa el servidor con el id que sale del JWT.
 { "status": "error", "message": "No tenés permisos para realizar esta acción" }
 ```
 
-**`POST /api/events` con rol `organizer` o `admin` → 201** (body de la petición: `title`, `description`, `date`, `location`, `capacity`):
+**`POST /api/events` con rol `organizer` o `admin` → 201** (el body completo y el detalle de cada campo están en la sección [Eventos](#eventos--entidad-central-y-lógica-de-negocio)):
 
 ```json
 {
@@ -466,11 +476,13 @@ El campo `createdBy` siempre lo completa el servidor con el id que sale del JWT.
     "_id": "6690...",
     "title": "Congreso Tech 2026",
     "description": "Charlas y talleres",
+    "category": "workshop",
     "date": "2026-12-01T10:00:00.000Z",
     "location": "Mendoza",
     "capacity": 100,
-    "createdBy": "665f2a...",
-    "status": "published"
+    "price": 500,
+    "status": "draft",
+    "organizer": "665f2a..."
   }
 }
 ```
@@ -481,13 +493,13 @@ El campo `createdBy` siempre lo completa el servidor con el id que sale del JWT.
 { "status": "error", "message": "No autenticado" }
 ```
 
-**`PATCH /api/events/:id` de un organizer sobre un evento ajeno → 403:**
+**`PUT /api/events/:id` de un organizer sobre un evento ajeno → 403:**
 
 ```json
 { "status": "error", "message": "No tenés permisos sobre este evento" }
 ```
 
-Otros errores de los endpoints de eventos: `400` (faltan campos, fecha inválida, capacidad que no sea un entero mayor a 0, id con formato inválido), `404` (el evento no existe) y `409` (cancelar un evento que ya está cancelado, o modificar uno cancelado).
+Los demás errores de los endpoints de eventos (`400`, `404`, `409`) están detallados en la sección [Eventos](#eventos--entidad-central-y-lógica-de-negocio).
 
 ### Cómo probar los casos (con Thunder Client)
 
@@ -505,7 +517,158 @@ Thunder Client guarda una sola cookie `currentUser` por vez: para cambiar de usu
    - Login como `organizer` → `POST /api/events` → `201` (guardá el `_id` que devuelve).
    - Como `organizer`: `GET /api/users` → `403`.
    - Login como `admin` → `GET /api/users` → `200`, sin ninguna contraseña en la lista.
-   - Con un segundo organizer, intentar `PATCH /api/events/:id` sobre el evento del primero → `403`. Con el admin, el mismo `PATCH` → `200`.
+   - Con un segundo organizer, intentar `PUT /api/events/:id` sobre el evento del primero → `403`. Con el admin, el mismo `PUT` → `200`.
+
+---
+
+## Eventos — entidad central y lógica de negocio
+
+### Modelo `Event`
+
+| Campo | Tipo | Reglas |
+|---|---|---|
+| `title` | String | Obligatorio |
+| `description` | String | Obligatorio |
+| `category` | String | Obligatorio (texto libre, por ejemplo `workshop`, `conference`, `meetup`) |
+| `date` | Date | Obligatoria. No puede ser pasada al crear |
+| `location` | String | Obligatorio |
+| `capacity` | Number | Obligatoria, entero mayor a 0 |
+| `price` | Number | Mayor o igual a 0. Si no se envía, vale `0` (evento gratuito) |
+| `status` | String | Solo `draft`, `published`, `cancelled` o `finished`. Por defecto `draft` |
+| `organizer` | ObjectId → `User` | **Referencia** (solo el id) al usuario que creó el evento, no un objeto embebido. Siempre lo asigna el servidor desde `req.user`; no puede venir del body |
+
+### Endpoints
+
+| Método | Ruta | Acceso | Qué hace |
+|---|---|---|---|
+| `POST` | `/api/events` | `organizer`, `admin` | Crea un evento. El `organizer` se toma del token |
+| `GET` | `/api/events` | Público | Lista con filtros, paginación y orden |
+| `GET` | `/api/events/:id` | Público | Devuelve un evento (404 si no existe) |
+| `PUT` | `/api/events/:id` | Dueño del evento o `admin` | Modifica los datos. Actualiza los campos que se envíen; `organizer` y `status` del body se ignoran |
+| `PATCH` | `/api/events/:id/status` | Dueño del evento o `admin` | Cambia el estado (publicar, cancelar, finalizar) |
+
+Los eventos **nunca se eliminan físicamente**: cancelar es cambiar el estado a `cancelled`.
+
+### Crear un evento — `POST /api/events`
+
+```json
+{
+  "title": "Congreso Tech 2026",
+  "description": "Charlas y talleres",
+  "category": "workshop",
+  "date": "2026-12-01T10:00:00.000Z",
+  "location": "Mendoza",
+  "capacity": 100,
+  "price": 500
+}
+```
+
+`price` es opcional. También se puede enviar `"status": "published"` para crear el evento ya publicado (por defecto nace como `draft`); no se puede crear como `cancelled` ni `finished`. Respuesta `201` con el evento creado en `payload`.
+
+### Estados y cambios permitidos
+
+```
+draft ──► published ──► finished
+  │           │
+  └───────────┴──► cancelled
+```
+
+| Estado actual | Puede pasar a |
+|---|---|
+| `draft` | `published`, `cancelled` |
+| `published` | `cancelled`, `finished` |
+| `cancelled` | *(ninguno: estado final)* |
+| `finished` | *(ninguno: estado final)* |
+
+Para cambiar el estado: `PATCH /api/events/:id/status` con `{ "status": "published" }`.
+
+### Reglas de negocio principales
+
+Todas viven en `src/services/events.service.js` (no en las rutas ni en los controllers):
+
+- **No se crean eventos con fecha pasada** (400).
+- **`capacity` debe ser un entero mayor a 0 y `price` mayor o igual a 0** (400), tanto al crear como al modificar.
+- **No se publican eventos cancelados ni finalizados** (409). En general, un evento `cancelled` o `finished` no cambia de estado.
+- **Los eventos cancelados no se modifican** (409). La consigna lo pide así; por coherencia, tampoco se modifican los finalizados.
+- **Un organizer solo gestiona sus propios eventos**; un admin gestiona cualquiera (403 si no corresponde).
+- **`organizer` se asigna desde el token**, nunca desde el body.
+- **Borradores**: no son públicos. En el listado no aparecen salvo que se pida `?status=draft`, y eso exige sesión: sin sesión → 401; con rol `user` → 403; un organizer ve solo sus borradores y un admin ve todos. `GET /api/events/:id` de un borrador responde 404 para cualquiera que no sea su organizer o un admin.
+
+### Listado con filtros — `GET /api/events`
+
+| Parámetro | Qué hace | Por defecto |
+|---|---|---|
+| `status` | `published`, `draft`, `cancelled` o `finished` | `published` |
+| `category` | Coincidencia exacta, sin distinguir mayúsculas | — |
+| `location` | Contiene el texto, sin distinguir mayúsculas | — |
+| `dateFrom` | Eventos desde esta fecha (inclusive). Formato `AAAA-MM-DD` o ISO | — |
+| `dateTo` | Eventos hasta esta fecha (inclusive). Con `AAAA-MM-DD` incluye todo ese día | — |
+| `page` | Número de página (entero ≥ 1) | `1` |
+| `limit` | Eventos por página (entero entre 1 y 50) | `10` |
+| `sort` | `date`, `price`, `title`, `capacity` o `createdAt`. Con `-` adelante es descendente (`-price`). Se pueden combinar con coma (`-price,date`) | `date` (los más próximos primero) |
+
+Ejemplo: `GET /api/events?status=published&category=workshop&page=2&limit=5`
+
+```json
+{
+  "status": "success",
+  "data": [
+    {
+      "_id": "6690...",
+      "title": "[Demo] Taller de Git y GitHub",
+      "category": "workshop",
+      "date": "2026-11-20T15:00:00.000Z",
+      "location": "Córdoba",
+      "capacity": 50,
+      "price": 0,
+      "status": "published",
+      "organizer": "665f2a..."
+    }
+  ],
+  "page": 2,
+  "limit": 5,
+  "total": 8,
+  "totalPages": 2
+}
+```
+
+Este es el único endpoint que devuelve los datos en `data` (y no en `payload`), porque lleva al lado la información de paginación. Un parámetro inválido (`page=0`, `limit=100`, `sort=password`, una fecha imposible, etc.) responde `400` con un mensaje claro. Para que las páginas no repitan ni salteen eventos cuando hay empates, el orden siempre se desempata por `_id`.
+
+### Errores de los endpoints de eventos
+
+| Código | Cuándo |
+|---|---|
+| `400` | Faltan campos obligatorios, un campo vacío, fecha inválida o pasada (al crear), `capacity` o `price` inválidos, estado inexistente, id con formato inválido, parámetros del listado inválidos, o un `PUT` sin ningún campo para actualizar |
+| `401` | No hay sesión válida (`No autenticado`) |
+| `403` | El rol no alcanza, o el evento es de otro organizer |
+| `404` | El evento no existe (`Evento no encontrado`) |
+| `409` | Cambio de estado no permitido, o modificar un evento cancelado o finalizado |
+
+Un id con formato inválido (por ejemplo `/api/events/abc`) responde `400`; un id con formato válido que no corresponde a ningún evento responde `404`.
+
+### Datos de ejemplo (opcional)
+
+Para probar el listado sin crear eventos uno por uno hay un script que carga 14 eventos de ejemplo (todos con el prefijo `[Demo]`, de distintas categorías, lugares, fechas y estados). El email tiene que ser el de un usuario ya registrado con rol `organizer` o `admin`:
+
+```bash
+npm run seed-events -- organizer@mail.com
+```
+
+Si se vuelve a ejecutar, no duplica los eventos que ya existen.
+
+### Casos a probar (con Thunder Client)
+
+| # | Caso | Resultado esperado |
+|---|---|---|
+| 1 | `POST /api/events` con rol `user` | `403` |
+| 2 | `POST /api/events` con fecha pasada | `400` |
+| 3 | `POST /api/events` con `capacity: 0` | `400` |
+| 4 | `PUT /api/events/:id` de un organizer sobre un evento propio | `200` |
+| 5 | `PUT /api/events/:id` de un organizer sobre un evento ajeno | `403` |
+| 6 | `PUT /api/events/:id` de un admin sobre un evento de otro organizer | `200` |
+| 7 | `PATCH /api/events/:id/status` sobre un evento cancelado | `409` |
+| 8 | `GET /api/events?status=published&category=workshop&page=2&limit=5` | `200` con `data`, `page`, `limit`, `total` y `totalPages` |
+| 9 | `GET /api/events/:id` con un id que no existe (por ejemplo `000000000000000000000000`) | `404` |
 
 ---
 
@@ -532,8 +695,8 @@ No hace falta tocar `app.js` (ya tiene `passport.initialize()`) ni modificar nin
 El objetivo de este proyecto es ir creciendo entrega a entrega sobre la misma base, sin reordenar nada de lo ya construido. Lo que falta para las próximas entregas:
 
 - Login con proveedores externos (Google, GitHub) usando la estructura que ya dejó preparada Passport
-- CRUD completo de eventos (hoy se pueden listar, crear, modificar y cancelar)
 - Inscripciones, control de cupos y tickets
+- Notificaciones
 
 En cada endpoint nuevo que se agregue de acá en adelante se mantiene el mismo patrón ya establecido: nunca se expone `password` en ninguna respuesta, y nunca se acepta `role` (ni ningún otro campo sensible) directamente desde el body de la petición.
 
