@@ -14,20 +14,24 @@
 import { Router } from 'express';
 import {
   getEvents,
+  getEventById,
   createEvent,
   updateEvent,
-  cancelEvent,
+  updateEventStatus,
 } from '../controllers/events.controller.js';
-import { authenticate } from '../middlewares/auth.middleware.js';
+import { authenticate, authenticateOptional } from '../middlewares/auth.middleware.js';
 import { authorize } from '../middlewares/authorize.middleware.js';
 import { PERMISSIONS } from '../config/roles.config.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 
 const router = Router();
 
-// Pública: cualquiera puede consultar los eventos publicados (esta ruta
-// ya existía antes de los roles y se mantiene igual).
-router.get('/', asyncHandler(getEvents));
+// Públicas: cualquiera puede consultar eventos, tenga o no sesión.
+// authenticateOptional no corta nada: solo reconoce a la persona si hay
+// sesión, para que los borradores sigan siendo visibles únicamente para su
+// organizer y para los admin.
+router.get('/', authenticateOptional, asyncHandler(getEvents));
+router.get('/:id', authenticateOptional, asyncHandler(getEventById));
 
 // Solo organizer o admin.
 router.post(
@@ -37,10 +41,10 @@ router.post(
   asyncHandler(createEvent)
 );
 
-// Modificar y cancelar: el middleware deja pasar a organizer y admin, y
-// después el service verifica que el organizer sea dueño de ESE evento
-// (el admin puede con cualquiera).
-router.patch(
+// Modificar y cambiar de estado (cancelar es un cambio de estado): el
+// middleware deja pasar a organizer y admin, y después el service verifica
+// que el organizer sea dueño de ESE evento (el admin puede con cualquiera).
+router.put(
   '/:id',
   authenticate,
   authorize(...PERMISSIONS.MANAGE_OWN_EVENT),
@@ -48,10 +52,10 @@ router.patch(
 );
 
 router.patch(
-  '/:id/cancel',
+  '/:id/status',
   authenticate,
   authorize(...PERMISSIONS.MANAGE_OWN_EVENT),
-  asyncHandler(cancelEvent)
+  asyncHandler(updateEventStatus)
 );
 
 export default router;
