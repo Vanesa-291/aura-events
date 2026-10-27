@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "set-role": "node scripts/set-role.js"
+    "set-role": "node scripts/set-role.js",
+    "seed-events": "node scripts/seed-events.js"
   },
   "author": "Vanesa",
   "license": "ISC",
