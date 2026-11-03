@@ -16,6 +16,9 @@
 //   Modificar/cancelar eventos propios   ❌        ✅         ✅
 //   Modificar cualquier evento           ❌        ❌         ✅
 //   Ver todos los usuarios               ❌        ❌         ✅
+//   Inscribirse y cancelar tickets propios  ✅     ✅         ✅
+//   Ver los tickets de un evento         ❌   solo de los suyos  ✅
+//   Cancelar el ticket de otra persona   ❌        ❌         ✅
 
 // Object.freeze evita que alguien, por accidente, modifique estos
 // valores mientras el servidor está corriendo.
@@ -35,4 +38,8 @@ export const PERMISSIONS = Object.freeze({
   MANAGE_OWN_EVENT: Object.freeze([ROLES.ORGANIZER, ROLES.ADMIN]),
   MANAGE_ANY_EVENT: Object.freeze([ROLES.ADMIN]),
   VIEW_ALL_USERS: Object.freeze([ROLES.ADMIN]),
+  // Tickets (Pre-entrega 7). Inscribirse y ver los propios tickets lo puede
+  // hacer cualquier persona con sesión, así que no necesitan permiso por rol.
+  VIEW_EVENT_TICKETS: Object.freeze([ROLES.ORGANIZER, ROLES.ADMIN]),
+  MANAGE_ANY_TICKET: Object.freeze([ROLES.ADMIN]),
 });
