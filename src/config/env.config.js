@@ -37,3 +37,38 @@ export const JWT_SECRET     = process.env.JWT_SECRET;
 // ejemplo, usar sesiones más cortas en producción y más largas mientras
 // se está desarrollando y probando, sin tocar ni una línea de código.
 export const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN;
+
+// ----------------------------------------------------------------------
+// Configuración del correo (Nodemailer) — Pre-entrega 7
+// ----------------------------------------------------------------------
+// Estas cinco variables sirven para enviar el email de confirmación cuando
+// alguien se inscribe a un evento. Las credenciales NUNCA se escriben en el
+// código: solo viven en el archivo .env (que no se sube a GitHub).
+//
+// A diferencia de las variables de arriba, a propósito NO son obligatorias
+// para arrancar: si faltan, el servidor igual levanta y todo lo demás sigue
+// funcionando (incluso las inscripciones); lo único que no se hace es
+// mandar el email, y se avisa en la consola. Así, quien clone el proyecto
+// puede probarlo sin tener una cuenta de correo configurada.
+export const MAIL_HOST = process.env.MAIL_HOST;
+export const MAIL_PORT = Number(process.env.MAIL_PORT);
+export const MAIL_USER = process.env.MAIL_USER;
+export const MAIL_PASS = process.env.MAIL_PASS;
+export const MAIL_FROM = process.env.MAIL_FROM;
+
+const MAIL_VARS = ['MAIL_HOST', 'MAIL_PORT', 'MAIL_USER', 'MAIL_PASS', 'MAIL_FROM'];
+const missingMailVars = MAIL_VARS.filter((key) => !process.env[key]);
+const invalidMailPort =
+  !missingMailVars.includes('MAIL_PORT') &&
+  !(Number.isInteger(MAIL_PORT) && MAIL_PORT > 0);
+
+// true solo si están las cinco variables y el puerto es un número válido.
+export const MAIL_CONFIGURED = missingMailVars.length === 0 && !invalidMailPort;
+
+if (!MAIL_CONFIGURED) {
+  console.warn('Aviso: el envío de emails no está configurado, así que las inscripciones se');
+  console.warn('guardan igual pero no se manda el email de confirmación.');
+  missingMailVars.forEach((key) => console.warn(`  - falta ${key}`));
+  if (invalidMailPort) console.warn('  - MAIL_PORT tiene que ser un número (por ejemplo 2525)');
+  console.warn('Revisá el archivo .env.example para ver cómo configurarlo.');
+}
