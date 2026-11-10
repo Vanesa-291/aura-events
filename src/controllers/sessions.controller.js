@@ -18,6 +18,7 @@
 // controller, sin tocar ni una línea de la estrategia 'login'.
 
 import { signToken } from '../utils/jwt.js';
+import { UserDTO, CurrentUserDTO } from '../dto/user.dto.js';
 import { NODE_ENV, JWT_EXPIRES_IN } from '../config/env.config.js';
 import ms from 'ms';
 
@@ -67,11 +68,12 @@ export const sessionsPlaceholder = (req, res) => {
 // con next(err) y este handler ni se llega a ejecutar. Si llegamos
 // hasta acá, req.user ES el usuario recién creado, ya sin password
 // (sessions.service.js lo arma así) y con el rol por defecto aplicado
-// por el modelo.
+// por el modelo. Igual, antes de responder pasa por UserDTO, que es el que
+// decide qué campos del usuario salen (el password nunca está entre ellos).
 export const register = (req, res) => {
   res.status(201).json({
     status: 'success',
-    payload: req.user,
+    payload: new UserDTO(req.user),
   });
 };
 
@@ -127,11 +129,12 @@ export const login = (req, res) => {
 // Si algo hubiera fallado, la estrategia ya habría cortado la petición
 // con 401 y este handler ni se ejecutaría. Por eso acá no hay nada que
 // validar: simplemente devolvemos lo que Passport ya nos dejó
-// preparado.
+// preparado, dándole forma con CurrentUserDTO (id, email, role y las
+// fechas del token).
 export const current = (req, res) => {
   res.status(200).json({
     status: 'success',
-    payload: req.user,
+    payload: new CurrentUserDTO(req.user),
   });
 };
 
