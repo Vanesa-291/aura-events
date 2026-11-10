@@ -107,6 +107,7 @@ El archivo `.env` nunca se sube al repositorio — está excluido en `.gitignore
 ```bash
 npm start       # modo normal
 npm run dev     # se reinicia solo al guardar cambios
+npm test        # corre los tests automáticos (no necesita base de datos)
 ```
 
 Y una herramienta de administración para asignar roles (ver la sección [Roles y autorización](#roles-y-autorización)):
@@ -183,6 +184,11 @@ aura-events/
 │   │   └── jwt.js                   # signToken / verifyToken (JWT)
 │   ├── app.js                 # arma la aplicación de Express e inicializa Passport (sin levantarla)
 │   └── server.js              # valida el entorno, conecta la base y levanta el servidor
+├── tests/
+│   ├── helpers/               # datos de mentira y variables de entorno de prueba
+│   ├── tickets.service.test.js  # inscripciones, cupos, carrera, email y cancelación
+│   ├── events.service.test.js   # reglas de eventos, permisos y listado con filtros
+│   └── dto.test.js              # lo que se muestra (y lo que nunca se muestra) en las respuestas
 ├── scripts/
 │   ├── set-role.js            # herramienta de línea de comandos para asignar roles
 │   └── seed-events.js         # carga eventos de ejemplo (opcional, para probar el listado)
@@ -1017,6 +1023,27 @@ El contenido del evento (por ejemplo el título) se escapa antes de ponerlo en e
 | 8 | Cancelar el ticket de otra persona siendo `user` | `403` |
 | 9 | `GET /api/events/:eid/tickets` como `user` común | `403` |
 | 10 | `GET /api/events/:eid/tickets` como `organizer` de otro evento | `403` |
+
+---
+
+## Tests automáticos
+
+```bash
+npm test
+```
+
+Usan el **test runner que ya trae Node.js** (`node:test`), así que no hay que instalar nada. Corren en un par de segundos y **no necesitan base de datos ni conexión a internet**: los repositories y el envío de email se reemplazan por versiones de mentira (*mocks*), de modo que se prueba solo la lógica de la capa de services. Los tests definen sus propias variables de entorno de prueba (con una base inexistente), así que no usan los datos de tu `.env` ni pueden tocar tu base real.
+
+| Archivo | Qué cubre |
+|---|---|
+| `tests/tickets.service.test.js` | Inscripción: evento inexistente, no publicado o con fecha vencida, `quantity` inválida, duplicados, cupo agotado y mensajes claros, orden de la transacción (bloqueo → conteos → guardado → email), código de reserva repetido, email que falla sin romper la inscripción; cancelación y permisos; "mis tickets" y tickets de un evento |
+| `tests/tickets.service.test.js` (carrera) | Pedidos simultáneos por el mismo cupo: con 1 lugar y 2 pedidos a la vez queda **exactamente 1** reserva (repetido 50 veces); 10 pedidos por 3 lugares dejan 3; la misma persona 3 veces a la vez queda con 1 ticket; y una **contraprueba** que muestra que sin el bloqueo del evento se venderían lugares de más |
+| `tests/events.service.test.js` | Crear eventos (fecha pasada, `capacity`, `price`, textos vacíos, estado inicial, el organizer sale de la sesión), modificar (dueño, otro organizer, admin, eventos cancelados o finalizados), cambios de estado permitidos y prohibidos, borradores, y el listado con filtros, orden, paginación (`data`, `page`, `limit`, `total`, `totalPages`) y rechazo de operadores de MongoDB en la URL |
+| `tests/dto.test.js` | Que `password` y `__v` nunca salgan en las respuestas, y que `populate` solo muestre los campos permitidos |
+
+**Qué se prueba con mocks y qué no.** La carrera de los tests usa una "base" en memoria cuya transacción atiende de a una a las que tocan el mismo evento, igual que el bloqueo real de MongoDB; eso verifica la **lógica del service**. El comportamiento real de la transacción contra Atlas se comprobó a mano con 5 inscripciones simultáneas a un evento de 1 solo lugar (resultado: 1 reserva y 4 respuestas `409`).
+
+Para el flujo completo de punta a punta (registro, login, evento, inscripción, cancelación) seguí los casos de las secciones *Casos a probar* con Thunder Client o Postman.
 
 ---
 
