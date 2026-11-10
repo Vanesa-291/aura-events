@@ -27,6 +27,8 @@ La Pre-entrega 7 suma el **flujo de inscripciones**: una nueva entidad `Ticket` 
 
 La Pre-entrega 8 no agrega endpoints ni cambia cómo se consume la API: **refactoriza la arquitectura** en capas formales. El acceso a datos queda separado en **DAOs** (los únicos que importan los modelos de Mongoose) y **repositories** (que hablan en el lenguaje del dominio), los services concentran toda la lógica de negocio sin tocar modelos ni DAOs, los controllers solo coordinan request y response, y los **DTO** controlan exactamente qué datos de usuarios, eventos y tickets viajan en cada respuesta, sin exponer nunca el `password`, ni siquiera hasheado. Se explica en detalle en la sección [Arquitectura en capas](#arquitectura-en-capas).
 
+**Ajustes tras la corrección de la Pre-entrega 7.** El profesor señaló dos mejoras sobre las inscripciones y se resolvieron sin cambiar endpoints ni respuestas (salvo el nuevo `409` por fecha): (1) ahora el service también valida la **fecha real del evento** —un evento que sigue en estado `published` pero cuya fecha ya pasó rechaza inscripciones—, y (2) el control de cupos pasó a una **transacción de MongoDB** que bloquea el evento mientras se cuenta el cupo y se guarda el ticket, de modo que dos pedidos simultáneos por el último lugar ya no terminan los dos cancelados: siempre queda exactamente una reserva (ver [Regla de cupos](#regla-de-cupos)).
+
 ---
 
 ## Tecnologías utilizadas
@@ -158,6 +160,7 @@ aura-events/
 │   ├── dao/
 │   │   ├── events.dao.js            # única capa que importa el modelo Event
 │   │   ├── tickets.dao.js           # única capa que importa el modelo Ticket
+│   │   ├── transaction.dao.js       # ejecuta un trabajo dentro de una transacción de Mongo
 │   │   └── users.dao.js             # única capa que importa el modelo User
 │   ├── dto/
 │   │   ├── dto.helpers.js           # herramientas compartidas (lista blanca de campos, populate)
@@ -225,10 +228,12 @@ Router → Controller → Service → Repository → DAO → Model (Mongoose) �
 | Entidad | DAO (acceso genérico a datos) | Repository (lenguaje del dominio) |
 |---|---|---|
 | Usuario | `UsersDAO`: `create`, `findById`, `findOne`, `findAll` | `UsersRepository`: `create`, `findById`, `findByEmail`, `findAll` |
-| Evento | `EventsDAO`: `create`, `findById`, `find`, `count`, `update` | `EventsRepository`: `create`, `findById`, `findPaginated`, `update`, `updateStatus` |
-| Ticket | `TicketsDAO`: `create`, `findById`, `find`, `count`, `sum`, `updateOne` | `TicketsRepository`: `create`, `findById`, `findByUser`, `findByEvent`, `countActiveTickets`, `countOccupiedSeats`, `cancelTicket` |
+| Evento | `EventsDAO`: `create`, `findById`, `find`, `count`, `update`, `lock` | `EventsRepository`: `create`, `findById`, `findPaginated`, `update`, `updateStatus`, `lock` |
+| Ticket | `TicketsDAO`: `create`, `findById`, `find`, `count`, `sum`, `updateOne` | `TicketsRepository`: `transaction`, `create`, `findById`, `findByUser`, `findByEvent`, `countActiveTickets`, `countOccupiedSeats`, `cancelTicket` |
 
 Un ejemplo de cómo se reparten el trabajo: el DAO solo sabe **contar** tickets que cumplan un filtro y **sumar** un campo; el repository sabe que "ticket activo" quiere decir `confirmed` o `pending` y arma con eso `countActiveTickets` y `countOccupiedSeats`; y el service decide qué hacer con el número (rechazar con `409` si no hay cupo).
+
+Las **transacciones** también son acceso a la base, así que las maneja el DAO: `transaction.dao.js` ofrece `runInTransaction(trabajo)`, que ejecuta una función como una sola unidad (todo o nada) y le entrega un objeto opaco `tx`. Las capas de arriba no saben qué es: solo se lo pasan a las operaciones que deben formar parte de la transacción (`create`, `count` y `sum` de tickets, y `lock` de eventos aceptan un `tx` opcional; sin él funcionan como siempre). El service accede a esto a través de `TicketsRepository.transaction`, sin importar Mongoose.
 
 Los estados válidos (`EVENT_STATUSES`, `TICKET_STATUSES`) viven junto a cada modelo, y llegan al service pasando por el DAO y el repository, para que el service no tenga que importar modelos.
 
@@ -273,10 +278,10 @@ Hay un único middleware centralizado (`src/middlewares/errorHandler.middleware.
 
 1. **Router** (`tickets.router.js`): pasa por `authenticate` (sin sesión, responde `401`) y llama al controller.
 2. **Controller** (`createTicket`): toma `eid` de la URL, `quantity` del body y el usuario de la sesión, y llama al service. No decide nada.
-3. **Service** (`TicketsService.createTicket`): verifica que el evento exista y esté publicado, que la cantidad sea válida, que no haya un ticket activo duplicado y que haya cupo. Para cada consulta le habla al repository.
-4. **Repository** (`EventsRepository.findById`, `TicketsRepository.countActiveTickets`, `countOccupiedSeats` y `create`): convierte cada pregunta en operaciones de datos.
-5. **DAO** (`findById`, `count`, `sum` y `create`): ejecuta las consultas contra Mongoose.
-6. **De vuelta en el service**: guarda el ticket, vuelve a comprobar cupo y duplicado por si dos pedidos llegaron a la vez y envía el email de confirmación.
+3. **Service** (`TicketsService.createTicket`): verifica que el evento exista, esté publicado y no haya pasado de fecha, y que la cantidad sea válida; después abre una transacción que bloquea el evento y, ya dentro, comprueba que no haya un ticket activo duplicado y que haya cupo. Para cada consulta le habla al repository.
+4. **Repository** (`EventsRepository.findById` y `lock`, `TicketsRepository.transaction`, `countActiveTickets`, `countOccupiedSeats` y `create`): convierte cada pregunta en operaciones de datos.
+5. **DAO** (`findById`, `lock`, `runInTransaction`, `count`, `sum` y `create`): ejecuta las consultas contra Mongoose.
+6. **De vuelta en el service**: la transacción ya guardó el ticket (sin comprobaciones posteriores, porque nadie pudo colarse en el medio) y recién entonces se envía el email de confirmación.
 7. **Controller**: arma la respuesta `201` pasando el ticket por `TicketDTO`.
 
 ### Comportamiento de la API
@@ -292,6 +297,8 @@ Todas las rutas existentes (sesiones, usuarios, eventos y tickets) responden exa
 | 3 | `GET /api/events/:eid/tickets` como organizer dueño, y `GET /api/tickets/my-tickets` | Cada persona o evento relacionado llega solo con los campos permitidos, sin `password` |
 | 4 | Inscribirse a un evento cancelado | `409` con un mensaje claro, nunca `500` |
 | 5 | Pedir un endpoint protegido sin sesión; y con sesión pero sin el rol necesario | `401` sin sesión; `403` con sesión sin permisos |
+| 6 | Inscribirse a un evento `published` cuya fecha ya pasó | `409` `No se puede inscribir a un evento cuya fecha ya pasó` |
+| 7 | Evento con 1 solo lugar y varios pedidos simultáneos de personas distintas | Exactamente un `201`; el resto responde `409` (cupo agotado) |
 
 ---
 
@@ -852,12 +859,14 @@ Body (opcional): `{ "quantity": 2 }`. Si no se manda, se reserva 1 lugar. Cualqu
 El service valida, en este orden:
 
 1. **El evento existe** → si no, `404` `Evento no encontrado` (un id con formato inválido responde `400`).
-2. **El evento está publicado** → un evento cancelado o finalizado responde `409` (`No se puede inscribir a un evento cancelado` / `finalizado`), y uno en borrador, `409` `El evento todavía no está publicado`.
+2. **El evento está publicado y todavía no ocurrió** → un evento cancelado o finalizado responde `409` (`No se puede inscribir a un evento cancelado` / `finalizado`), y uno en borrador, `409` `El evento todavía no está publicado`. Además se compara la **fecha del evento con el momento del intento**: si ya pasó, aunque el estado siga siendo `published`, responde `409` `No se puede inscribir a un evento cuya fecha ya pasó`.
 3. **`quantity` es válida** → entero mayor a 0; si no, `400`.
 4. **No hay un ticket activo de esa persona para ese evento** → si lo hay, `409` `Ya tenés una inscripción activa para este evento`.
 5. **Hay cupo suficiente** → si no, `409` con un mensaje claro: `No hay cupo suficiente: quedan 2 lugares y pediste 3` o `No quedan cupos disponibles para este evento`.
 6. Se guarda el ticket como `confirmed`, con su `reservationCode`.
 7. Se envía el **email de confirmación** (ver más abajo).
+
+Los pasos 4, 5 y 6 se hacen juntos dentro de **una transacción que bloquea el evento** (ver [Regla de cupos](#regla-de-cupos)); los pasos 1 a 3 se comprueban antes, para responder rápido sin abrir la transacción, y el paso 2 se vuelve a comprobar ya con el evento bloqueado.
 
 Respuesta `201`:
 
@@ -893,7 +902,22 @@ Ese número **no se guarda en ningún lado**: se calcula cada vez que hace falta
 
 **Una inscripción activa por persona y por evento.** Una persona puede reservar varios lugares usando `quantity`, pero no tener dos tickets activos del mismo evento. Si cancela, puede volver a inscribirse.
 
-Como la validación y el guardado son pasos separados, dos pedidos que lleguen exactamente al mismo tiempo podrían pasar la validación los dos. Para que eso nunca termine vendiendo de más, después de guardar el ticket el service **vuelve a comprobar** el cupo y los duplicados; si algo se pasó, cancela ese ticket (no lo borra) y responde `409`. En una carrera muy ajustada puede rechazar a una persona de más, pero nunca deja pasar más gente que `capacity`.
+**Qué pasa si dos pedidos llegan al mismo tiempo.** Contar el cupo y guardar el ticket son pasos separados, y con dos pedidos simultáneos por el último lugar los dos podrían ver "queda 1" y los dos guardar. La primera versión resolvía eso volviendo a contar después de guardar y cancelando el propio ticket si el cupo se había pasado; pero con un solo lugar libre los dos pedidos veían el cupo excedido y **los dos se cancelaban**: dos intentos y ninguna reserva.
+
+Ahora el service hace todo dentro de **una transacción de MongoDB** (`reserveSeats` en `tickets.service.js`):
+
+1. Lo primero que hace la transacción es **bloquear el evento** (`EventsRepository.lock`): una escritura mínima sobre ese documento que no cambia ningún dato del evento (solo suma 1 al contador interno `__v`, que además no se expone en las respuestas, y no toca `updatedAt`).
+2. Mongo no permite que dos transacciones escriban el mismo documento a la vez: la segunda recibe un conflicto transitorio y se **reintenta sola** cuando la primera termina. Por eso las inscripciones al mismo evento se atienden **de a una**.
+3. Ya con el evento bloqueado se comprueba el duplicado y el cupo, y se guarda el ticket. Cuando la transacción termina (commit), la siguiente arranca viendo el ticket ya guardado, así que el que llega segundo ve el cupo ocupado y recibe un `409` normal (`No quedan cupos disponibles para este evento`).
+
+Resultado: con 1 lugar libre y 2 pedidos simultáneos, **siempre queda exactamente una reserva** (una respuesta `201` y una `409`), y nunca se vende más de `capacity`. Ya no hace falta volver a comprobar ni cancelar nada después de guardar.
+
+Detalles a tener en cuenta:
+
+- Las transacciones necesitan una base con réplicas, como **MongoDB Atlas** (incluido el cluster gratuito M0). Un MongoDB local suelto, sin réplicas, no las soporta.
+- Dentro de la transacción solo se toca la base. El **email se envía después** de confirmarla, porque si Mongo reintenta la transacción no queremos mandar el mail dos veces.
+- Si el código de reserva generado ya existiera (casi imposible), se repite la transacción con un código nuevo.
+- Cancelar un ticket no necesita transacción: es una sola operación y solo libera lugar.
 
 ### Cancelación — `PATCH /api/tickets/:tid/cancel`
 
