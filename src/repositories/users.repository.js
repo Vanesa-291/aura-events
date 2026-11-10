@@ -1,10 +1,8 @@
-// Igual que events.repository.js: por ahora es un intermediario simple
-// que reenvía el pedido al DAO. La ventaja de que exista esta capa,
-// aunque hoy parezca "de más", es que el service nunca importa el DAO
-// directamente — siempre pasa por acá. Si más adelante necesitáramos,
-// por ejemplo, buscar datos de usuario combinando MongoDB con otra
-// fuente, este es el lugar donde se resolvería, sin que el service se
-// entere de ese detalle.
+// El repository es la capa intermedia entre el service y el DAO. Habla en el
+// idioma del dominio ("buscar por email", "listar usuarios") y se apoya en el
+// DAO para resolver cómo se hace eso en la base. No importa ningún modelo: si
+// necesitara datos, se los pide al DAO. El service nunca importa el DAO
+// directamente, siempre pasa por acá.
 
 import UsersDAO from '../dao/users.dao.js';
 
@@ -15,12 +13,16 @@ class UsersRepository {
     return await dao.create(userData);
   }
 
-  async findByEmail(email) {
-    return await dao.findByEmail(email);
+  async findById(id) {
+    return await dao.findById(id);
   }
 
-  async getAll() {
-    return await dao.getAll();
+  async findByEmail(email) {
+    return await dao.findOne({ email });
+  }
+
+  async findAll() {
+    return await dao.findAll();
   }
 }
 

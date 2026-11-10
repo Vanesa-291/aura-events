@@ -1,31 +1,44 @@
-// El repository es un intermediario simple entre el service y el DAO.
-// Por ahora solo reenvía el pedido, pero a medida que crezca el proyecto
-// es el lugar indicado para combinar datos de más de una fuente si hiciera
-// falta, sin que el service tenga que saber de dónde vienen.
+// El repository es el intermediario entre el service y el DAO. Ofrece
+// operaciones con nombres del dominio y arma, con las operaciones genéricas
+// del DAO, lo que el service necesita. No importa ningún modelo: todo lo que
+// toca la base pasa por el DAO.
 
 import EventsDAO from '../dao/events.dao.js';
+
+// Los estados válidos de un evento, para que el service los use sin tener que
+// importar el modelo.
+export { EVENT_STATUSES } from '../dao/events.dao.js';
 
 const dao = new EventsDAO();
 
 class EventsRepository {
-  async getAll() {
-    return await dao.getAll();
+  async findById(id) {
+    return await dao.findById(id);
   }
 
-  async getById(id) {
-    return await dao.getById(id);
-  }
+  // Trae UNA página de eventos que cumplan el filtro y además cuenta cuántos
+  // eventos cumplen el filtro en total (sin importar la página). Ese total es
+  // el que permite calcular cuántas páginas hay. Las dos consultas son
+  // independientes, así que se lanzan juntas con Promise.all.
+  async findPaginated(filter, { sort, skip, limit }) {
+    const [items, total] = await Promise.all([
+      dao.find(filter, { sort, skip, limit }),
+      dao.count(filter),
+    ]);
 
-  async findPaginated(filter, options) {
-    return await dao.findPaginated(filter, options);
+    return { items, total };
   }
 
   async create(eventData) {
     return await dao.create(eventData);
   }
 
-  async updateById(id, changes) {
-    return await dao.updateById(id, changes);
+  async update(id, changes) {
+    return await dao.update(id, changes);
+  }
+
+  async updateStatus(id, status) {
+    return await dao.update(id, { status });
   }
 }
 
