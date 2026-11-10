@@ -40,6 +40,13 @@ class EventsRepository {
   async updateStatus(id, status) {
     return await dao.update(id, { status });
   }
+
+  // Bloquea el evento hasta que termine la transacción "tx" y lo devuelve
+  // actualizado (null si no existe). Mientras tanto, otras transacciones que
+  // quieran bloquear el mismo evento esperan su turno (se reintentan solas).
+  async lock(id, tx) {
+    return await dao.lock(id, tx);
+  }
 }
 
 export default EventsRepository;

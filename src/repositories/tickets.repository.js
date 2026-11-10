@@ -5,6 +5,7 @@
 // "cancelar": cambiar el estado, nunca borrar. No importa ningún modelo.
 
 import TicketsDAO, { ACTIVE_TICKET_STATUSES } from '../dao/tickets.dao.js';
+import { runInTransaction } from '../dao/transaction.dao.js';
 
 // Los estados válidos de un ticket, para que el service los use sin tener que
 // importar el modelo.
@@ -16,8 +17,16 @@ const dao = new TicketsDAO();
 const activeStatuses = () => ({ $in: ACTIVE_TICKET_STATUSES });
 
 class TicketsRepository {
-  async create(ticketData) {
-    return await dao.create(ticketData);
+  // Ejecuta "work" como una sola unidad: todo o nada (ver transaction.dao.js).
+  // A "work" se le entrega un "tx" que hay que pasarle a cada operación que
+  // tenga que formar parte de la transacción.
+  async transaction(work) {
+    return await runInTransaction(work);
+  }
+
+  // "tx" es opcional: si viene, el ticket se crea dentro de esa transacción.
+  async create(ticketData, tx) {
+    return await dao.create(ticketData, tx);
   }
 
   async findById(id) {
@@ -51,22 +60,29 @@ class TicketsRepository {
 
   // Cuántos tickets activos tiene una persona en un evento (sirve para
   // detectar inscripciones duplicadas).
-  async countActiveTickets(userId, eventId) {
-    return await dao.count({
-      user: userId,
-      event: eventId,
-      status: activeStatuses(),
-    });
+  async countActiveTickets(userId, eventId, tx) {
+    return await dao.count(
+      {
+        user: userId,
+        event: eventId,
+        status: activeStatuses(),
+      },
+      tx
+    );
   }
 
   // Cuántos lugares están ocupados en un evento: la SUMA de "quantity" de los
   // tickets activos. Los cancelled no entran, por eso al cancelar el lugar
   // queda libre solo.
-  async countOccupiedSeats(eventId) {
-    return await dao.sum('quantity', {
-      event: eventId,
-      status: activeStatuses(),
-    });
+  async countOccupiedSeats(eventId, tx) {
+    return await dao.sum(
+      'quantity',
+      {
+        event: eventId,
+        status: activeStatuses(),
+      },
+      tx
+    );
   }
 
   // Cancela un ticket: cambia el estado y anota cuándo. NO borra el

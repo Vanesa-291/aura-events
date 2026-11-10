@@ -51,6 +51,24 @@ class EventsDAO {
       runValidators: true,
     });
   }
+
+  // Toma el "candado" de un evento dentro de una transacción (tx) y devuelve
+  // el evento tal como está en ese momento (o null si no existe).
+  //
+  // Es una escritura mínima: suma 1 al contador interno de versión (__v) del
+  // documento. No cambia ningún dato del evento (ni su updatedAt, por eso
+  // timestamps: false). Lo que importa es el efecto: dentro de una
+  // transacción, Mongo no deja que dos transacciones escriban el mismo
+  // documento a la vez; la que llega segunda es reintentada automáticamente
+  // cuando la primera termina. Así, todo lo que se haga con el evento después
+  // de este paso (como contar sus cupos) se hace de a UNA transacción por vez.
+  async lock(id, tx) {
+    return await Event.findOneAndUpdate(
+      { _id: id },
+      { $inc: { __v: 1 } },
+      { new: true, session: tx, timestamps: false }
+    );
+  }
 }
 
 export default EventsDAO;

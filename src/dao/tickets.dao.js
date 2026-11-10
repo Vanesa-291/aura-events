@@ -15,9 +15,15 @@ import '../models/User.js';
 // modelo directamente.
 export { TICKET_STATUSES, ACTIVE_TICKET_STATUSES } from '../models/Ticket.js';
 
+// Varias operaciones reciben un "tx" opcional: es lo que entrega
+// runInTransaction() (transaction.dao.js) y, si viene, la operación pasa a
+// formar parte de esa transacción. Si no viene, funciona como siempre.
 class TicketsDAO {
-  async create(ticketData) {
-    return await Ticket.create(ticketData);
+  // Mongoose solo permite indicar la sesión al crear usando la forma de
+  // arreglo, por eso se crea [ticketData] y se devuelve el primero.
+  async create(ticketData, tx) {
+    const [ticket] = await Ticket.create([ticketData], { session: tx });
+    return ticket;
   }
 
   async findById(id) {
@@ -40,21 +46,21 @@ class TicketsDAO {
     return await query;
   }
 
-  async count(filter = {}) {
-    return await Ticket.countDocuments(filter);
+  async count(filter = {}, tx) {
+    return await Ticket.countDocuments(filter).session(tx ?? null);
   }
 
   // Suma el valor de un campo numérico (por ejemplo "quantity") de todos los
   // tickets que cumplan el filtro. Devuelve 0 si no hay ninguno.
   // aggregate() no convierte los ids de texto a ObjectId por su cuenta
   // (find() sí), así que primero se le pide a Mongoose que castee el filtro.
-  async sum(field, filter = {}) {
+  async sum(field, filter = {}, tx) {
     const castFilter = Ticket.find(filter).cast(Ticket);
 
     const result = await Ticket.aggregate([
       { $match: castFilter },
       { $group: { _id: null, total: { $sum: `$${field}` } } },
-    ]);
+    ]).session(tx ?? null);
 
     return result.length > 0 ? result[0].total : 0;
   }
