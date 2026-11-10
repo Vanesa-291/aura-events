@@ -25,6 +25,8 @@ La Pre-entrega 6 construye la **entidad central del proyecto: los eventos**. El 
 
 La Pre-entrega 7 suma el **flujo de inscripciones**: una nueva entidad `Ticket` relaciona a cada usuario con un evento (solo con referencias, sin objetos embebidos). Quien tiene sesión iniciada puede inscribirse a un evento publicado, y el service controla que el evento exista y esté publicado, que la cantidad sea válida, que haya cupo suficiente (solo cuentan los tickets activos: los cancelados liberan su lugar) y que no haya inscripciones duplicadas. Cada ticket se puede cancelar sin borrarlo, hay un listado de "mis tickets" para cada persona y otro de los tickets de cada evento para su organizer o un admin, y al confirmarse una inscripción se envía un email con **Nodemailer**, con las credenciales en variables de entorno.
 
+La Pre-entrega 8 no agrega endpoints ni cambia cómo se consume la API: **refactoriza la arquitectura** en capas formales. El acceso a datos queda separado en **DAOs** (los únicos que importan los modelos de Mongoose) y **repositories** (que hablan en el lenguaje del dominio), los services concentran toda la lógica de negocio sin tocar modelos ni DAOs, los controllers solo coordinan request y response, y los **DTO** controlan exactamente qué datos de usuarios, eventos y tickets viajan en cada respuesta, sin exponer nunca el `password`, ni siquiera hasheado. Se explica en detalle en la sección [Arquitectura en capas](#arquitectura-en-capas).
+
 ---
 
 ## Tecnologías utilizadas
@@ -150,13 +152,18 @@ aura-events/
 │   │   ├── users.service.js
 │   │   └── sessions.service.js      # registerUser y validateCredentials (sin saber nada de JWT)
 │   ├── repositories/
-│   │   ├── events.repository.js
-│   │   ├── tickets.repository.js
-│   │   └── users.repository.js
+│   │   ├── events.repository.js     # operaciones del dominio de eventos (findPaginated, updateStatus...)
+│   │   ├── tickets.repository.js    # countActiveTickets, countOccupiedSeats, cancelTicket...
+│   │   └── users.repository.js      # findByEmail, findAll...
 │   ├── dao/
-│   │   ├── events.dao.js
-│   │   ├── tickets.dao.js
-│   │   └── users.dao.js
+│   │   ├── events.dao.js            # única capa que importa el modelo Event
+│   │   ├── tickets.dao.js           # única capa que importa el modelo Ticket
+│   │   └── users.dao.js             # única capa que importa el modelo User
+│   ├── dto/
+│   │   ├── dto.helpers.js           # herramientas compartidas (lista blanca de campos, populate)
+│   │   ├── user.dto.js              # UserDTO y CurrentUserDTO (nunca exponen password)
+│   │   ├── event.dto.js             # EventDTO
+│   │   └── ticket.dto.js            # TicketDTO (filtra también el user y el event de un populate)
 │   ├── models/
 │   │   ├── User.js                  # first_name, last_name, email, password, role
 │   │   ├── Event.js                 # title, description, category, date, location, capacity, price, status, organizer
@@ -188,7 +195,103 @@ aura-events/
 Router → Controller → Service → Repository → DAO → Model (Mongoose) → MongoDB
 ```
 
-Cada capa hace una sola cosa: el router solo conecta una URL con su controlador, el controlador traduce entre HTTP y el resto del sistema, el service es donde van a vivir las reglas del negocio, el repository es un intermediario, y el DAO es el único lugar que conversa directamente con la base de datos.
+Cada capa hace una sola cosa: el router solo conecta una URL con su controlador, el controlador traduce entre HTTP y el resto del sistema, el service concentra las reglas del negocio, el repository habla en el lenguaje del dominio, y el DAO es el único lugar que conversa directamente con la base de datos. La explicación completa está en la sección siguiente.
+
+---
+
+## Arquitectura en capas
+
+La Pre-entrega 8 no agrega endpoints ni cambia ninguna respuesta de la API: ordena el código en **capas formales**, cada una con una sola responsabilidad. Así, un cambio en una capa (por ejemplo, cambiar de base de datos o agregar un campo a una respuesta) no obliga a tocar las demás.
+
+```
+Router → Controller → Service → Repository → DAO → Model (Mongoose) → MongoDB
+                │
+                └── DTO (da forma a la respuesta antes de enviarla)
+```
+
+### Responsabilidad de cada capa
+
+| Capa | Carpeta | Qué hace | Qué NO hace |
+|---|---|---|---|
+| **Router** | `src/routes/` | Conecta cada URL con su controller y le pone los middlewares (`authenticate`, `authorize`) | No tiene lógica |
+| **Controller** | `src/controllers/` | Coordina request/response: lee `body`, `params` y `query`, llama al service y devuelve la respuesta pasando el resultado por el DTO | No calcula cupos, no valida estados, no resuelve reglas de negocio, no importa modelos |
+| **Service** | `src/services/` | Concentra **toda la lógica de negocio**: validación de cupos, estados, duplicados, permisos sobre recursos propios y envío de email | No importa modelos ni DAOs: siempre trabaja a través de repositories |
+| **Repository** | `src/repositories/` | Traduce las preguntas del dominio a operaciones de datos (`findByEmail`, `countActiveTickets`, `countOccupiedSeats`, `cancelTicket`...) usando el DAO | No importa modelos |
+| **DAO** | `src/dao/` | Es la **única capa que importa los modelos de Mongoose** y habla con la base. Solo tiene operaciones genéricas de acceso a datos | No tiene reglas de negocio ni nombres del dominio |
+| **DTO** | `src/dto/` | Define qué campos de usuario, evento y ticket viajan en cada respuesta | No consulta la base ni toma decisiones |
+
+### DAO y Repository de cada entidad
+
+| Entidad | DAO (acceso genérico a datos) | Repository (lenguaje del dominio) |
+|---|---|---|
+| Usuario | `UsersDAO`: `create`, `findById`, `findOne`, `findAll` | `UsersRepository`: `create`, `findById`, `findByEmail`, `findAll` |
+| Evento | `EventsDAO`: `create`, `findById`, `find`, `count`, `update` | `EventsRepository`: `create`, `findById`, `findPaginated`, `update`, `updateStatus` |
+| Ticket | `TicketsDAO`: `create`, `findById`, `find`, `count`, `sum`, `updateOne` | `TicketsRepository`: `create`, `findById`, `findByUser`, `findByEvent`, `countActiveTickets`, `countOccupiedSeats`, `cancelTicket` |
+
+Un ejemplo de cómo se reparten el trabajo: el DAO solo sabe **contar** tickets que cumplan un filtro y **sumar** un campo; el repository sabe que "ticket activo" quiere decir `confirmed` o `pending` y arma con eso `countActiveTickets` y `countOccupiedSeats`; y el service decide qué hacer con el número (rechazar con `409` si no hay cupo).
+
+Los estados válidos (`EVENT_STATUSES`, `TICKET_STATUSES`) viven junto a cada modelo, y llegan al service pasando por el DAO y el repository, para que el service no tenga que importar modelos.
+
+Los scripts de `scripts/` (`set-role.js` y `seed-events.js`) son herramientas de línea de comandos que se ejecutan a mano, fuera de la API, y por eso no forman parte de estas capas.
+
+### DTO: qué se muestra en cada respuesta
+
+Cada DTO funciona como una **lista blanca**: solo salen los campos que se nombran, y todo lo demás (por ejemplo `password`) se queda adentro, aunque el documento de la base lo tenga. El campo interno `__v` de Mongoose tampoco se expone.
+
+| DTO | Se usa en | Campos |
+|---|---|---|
+| `UserDTO` | `POST /api/sessions/register`, `GET /api/users` | `_id`, `first_name`, `last_name`, `email`, `role`, `createdAt`, `updatedAt` |
+| `CurrentUserDTO` | `GET /api/sessions/current` | `id`, `email`, `role`, `iat`, `exp` (los datos del token) |
+| `EventDTO` | todos los endpoints de eventos | `_id`, `title`, `description`, `category`, `date`, `location`, `capacity`, `price`, `status`, `organizer`, `createdAt`, `updatedAt` |
+| `TicketDTO` | todos los endpoints de tickets | `_id`, `user`, `event`, `status`, `quantity`, `reservationCode`, `cancelledAt`, `createdAt`, `updatedAt` |
+
+**Con `populate`, el DTO también filtra el documento relacionado.** En `GET /api/tickets/my-tickets` el `event` llega con solo `_id`, `title`, `date` y `location`; en `GET /api/events/:eid/tickets` el `user` llega con solo `_id`, `first_name`, `last_name` y `email`. Nunca viajan el `password` ni el `role` de otra persona. Si un campo no viene completado (sin `populate`), sigue siendo solo el id.
+
+### Manejo de errores
+
+Hay un único middleware centralizado (`src/middlewares/errorHandler.middleware.js`). Los services y los middlewares lanzan un `AppError` con su código y el handler arma siempre el mismo formato de respuesta, en toda la API:
+
+```json
+{
+  "status": "error",
+  "message": "Descripción del problema"
+}
+```
+
+| Código | Significa | Ejemplo |
+|---|---|---|
+| `400` | Datos inválidos | `quantity` en `0`, id con formato inválido, JSON mal formado |
+| `401` | No autenticado | Pedir `GET /api/tickets/my-tickets` sin sesión |
+| `403` | Sin permisos | Un `user` pidiendo los tickets de un evento, o cancelando el ticket de otra persona |
+| `404` | No encontrado | Evento o ticket inexistente, o una ruta que no existe |
+| `409` | Conflicto con el estado actual | Inscripción duplicada, cupo agotado, evento cancelado |
+| `500` | Error interno | Algo que no se previó: se responde con un mensaje genérico y el detalle real queda solo en la consola del servidor |
+
+### El recorrido de una inscripción por todas las capas
+
+`POST /api/events/:eid/tickets`, paso a paso:
+
+1. **Router** (`tickets.router.js`): pasa por `authenticate` (sin sesión, responde `401`) y llama al controller.
+2. **Controller** (`createTicket`): toma `eid` de la URL, `quantity` del body y el usuario de la sesión, y llama al service. No decide nada.
+3. **Service** (`TicketsService.createTicket`): verifica que el evento exista y esté publicado, que la cantidad sea válida, que no haya un ticket activo duplicado y que haya cupo. Para cada consulta le habla al repository.
+4. **Repository** (`EventsRepository.findById`, `TicketsRepository.countActiveTickets`, `countOccupiedSeats` y `create`): convierte cada pregunta en operaciones de datos.
+5. **DAO** (`findById`, `count`, `sum` y `create`): ejecuta las consultas contra Mongoose.
+6. **De vuelta en el service**: guarda el ticket, vuelve a comprobar cupo y duplicado por si dos pedidos llegaron a la vez y envía el email de confirmación.
+7. **Controller**: arma la respuesta `201` pasando el ticket por `TicketDTO`.
+
+### Comportamiento de la API
+
+Todas las rutas existentes (sesiones, usuarios, eventos y tickets) responden exactamente igual que antes: mismos métodos, mismas URLs, mismos códigos HTTP y mismos mensajes. Lo único que cambió en las respuestas es que ya no incluyen `__v`, el contador interno de versiones de Mongoose. No hace falta cambiar nada en cómo se consume la API.
+
+### Casos a probar (con Thunder Client)
+
+| # | Caso | Resultado esperado |
+|---|---|---|
+| 1 | Flujo completo: registro → login → crear evento → inscribirse → consultar mis tickets → cancelar | Todo responde bien, con los códigos de siempre (`201`, `200`, `201`, `201`, `200`, `200`) |
+| 2 | `GET /api/sessions/current` con sesión | `200` con `id`, `email`, `role`, `iat` y `exp`, sin `password` |
+| 3 | `GET /api/events/:eid/tickets` como organizer dueño, y `GET /api/tickets/my-tickets` | Cada persona o evento relacionado llega solo con los campos permitidos, sin `password` |
+| 4 | Inscribirse a un evento cancelado | `409` con un mensaje claro, nunca `500` |
+| 5 | Pedir un endpoint protegido sin sesión; y con sesión pero sin el rol necesario | `401` sin sesión; `403` con sesión sin permisos |
 
 ---
 
@@ -762,16 +865,15 @@ Respuesta `201`:
 {
   "status": "success",
   "payload": {
+    "_id": "6ae0a1b2c3d4e5f607182930",
     "user": "6ad79f4412745f02a12ccb9d",
     "event": "6adfe37ca157828d3e9b3e97",
     "status": "confirmed",
     "quantity": 2,
     "reservationCode": "AURA-K7M2QX9P",
     "cancelledAt": null,
-    "_id": "6ae0a1b2c3d4e5f607182930",
     "createdAt": "2026-11-02T22:10:00.000Z",
-    "updatedAt": "2026-11-02T22:10:00.000Z",
-    "__v": 0
+    "updatedAt": "2026-11-02T22:10:00.000Z"
   },
   "emailSent": true
 }
