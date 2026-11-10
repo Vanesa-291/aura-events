@@ -17,6 +17,12 @@
 //   • El cupo disponible NO se guarda en ningún lado: se calcula cada vez
 //     sumando los tickets activos. Por eso, al cancelar un ticket, el lugar
 //     queda libre automáticamente, sin tener que "devolver" nada.
+//   • Solo se puede inscribir a un evento publicado Y que todavía no
+//     ocurrió: se compara la fecha del evento con el momento del intento.
+//   • Contar los cupos y guardar el ticket se hace dentro de UNA
+//     transacción que bloquea el evento, así dos inscripciones simultáneas
+//     se atienden de a una y nunca se vende más de lo que hay (ver
+//     reserveSeats() más abajo).
 
 import TicketsRepository, { TICKET_STATUSES } from '../repositories/tickets.repository.js';
 import EventsRepository from '../repositories/events.repository.js';
@@ -66,19 +72,26 @@ async function findEventOrFail(eventId) {
   return event;
 }
 
-// Solo se puede inscribir a un evento publicado. Cada otro estado tiene su
-// propio mensaje para que se entienda por qué no se puede.
+// Solo se puede inscribir a un evento publicado y que todavía no ocurrió.
+// Cada caso tiene su propio mensaje para que se entienda por qué no se puede.
+// El estado no alcanza: un evento puede seguir "published" aunque su fecha ya
+// haya pasado (nadie lo marcó como finalizado), así que también se compara la
+// fecha del evento con el momento exacto del intento de inscripción.
 function assertEventOpenForTickets(event) {
-  if (event.status === 'published') return;
+  if (event.status !== 'published') {
+    if (EVENT_STATUS_LABELS[event.status]) {
+      throw new AppError(
+        `No se puede inscribir a un evento ${EVENT_STATUS_LABELS[event.status]}`,
+        409
+      );
+    }
 
-  if (EVENT_STATUS_LABELS[event.status]) {
-    throw new AppError(
-      `No se puede inscribir a un evento ${EVENT_STATUS_LABELS[event.status]}`,
-      409
-    );
+    throw new AppError('El evento todavía no está publicado', 409);
   }
 
-  throw new AppError('El evento todavía no está publicado', 409);
+  if (event.date.getTime() <= Date.now()) {
+    throw new AppError('No se puede inscribir a un evento cuya fecha ya pasó', 409);
+  }
 }
 
 // La cantidad es opcional (si no viene, se reserva 1 lugar). Si viene, tiene
@@ -110,16 +123,65 @@ function isDuplicateCodeError(err) {
   return err && err.code === 11000 && /reservationCode/.test(JSON.stringify(err.keyPattern || err.message));
 }
 
-// Guarda el ticket. Si por una casualidad enorme el código generado ya
-// existía (el índice único de Mongo lo rechaza), se prueba con otro.
-async function createWithUniqueCode(ticketData) {
+// Reserva los lugares: comprueba las reglas y guarda el ticket TODO dentro de
+// una transacción, que se confirma o se deshace como una sola unidad.
+//
+// ¿Por qué una transacción? Antes se contaba el cupo, se guardaba el ticket
+// y después se volvía a contar. Con un solo lugar libre y dos pedidos
+// simultáneos, los dos pasaban el primer conteo, los dos guardaban, los dos
+// veían el cupo excedido y los dos se cancelaban: dos intentos y ninguna
+// reserva. Ahora lo primero que hace la transacción es BLOQUEAR el evento
+// (una escritura mínima sobre ese documento). Mongo no deja que dos
+// transacciones escriban el mismo documento a la vez, así que la segunda
+// espera a que la primera termine y recién entonces cuenta: ve el lugar ya
+// ocupado y responde 409. Siempre queda exactamente una ganadora, sin
+// volver a comprobar ni cancelar nada después.
+//
+// Dentro de la transacción solo se toca la base: el mail se manda después,
+// porque si Mongo reintenta la transacción no queremos mandarlo dos veces.
+async function reserveSeats(eventId, user, quantity) {
   for (let attempt = 1; attempt <= MAX_CODE_ATTEMPTS; attempt += 1) {
     try {
-      return await ticketsRepository.create({
-        ...ticketData,
-        reservationCode: generateReservationCode(),
+      return await ticketsRepository.transaction(async (tx) => {
+        // Bloquea el evento y lo trae con los datos de este instante.
+        const event = await eventsRepository.lock(eventId, tx);
+        if (!event) {
+          throw new AppError('Evento no encontrado', 404);
+        }
+
+        // Las mismas reglas de siempre, ahora sobre el evento bloqueado, por
+        // si cambió (por ejemplo, lo cancelaron) desde la primera lectura.
+        assertEventOpenForTickets(event);
+
+        // La persona no tiene ya un ticket activo para este evento.
+        const alreadyActive = await ticketsRepository.countActiveTickets(user.id, event.id, tx);
+        if (alreadyActive > 0) {
+          throw new AppError('Ya tenés una inscripción activa para este evento', 409);
+        }
+
+        // Hay cupo: lo ocupado se calcula sumando los tickets ACTIVOS.
+        const occupied = await ticketsRepository.countOccupiedSeats(event.id, tx);
+        const available = Math.max(event.capacity - occupied, 0);
+        if (quantity > available) {
+          throw noSeatsError(available, quantity);
+        }
+
+        const ticket = await ticketsRepository.create(
+          {
+            user: user.id,
+            event: event.id,
+            quantity,
+            status: 'confirmed',
+            reservationCode: generateReservationCode(),
+          },
+          tx
+        );
+
+        return { event, ticket };
       });
     } catch (err) {
+      // Si por una casualidad enorme el código generado ya existía (el índice
+      // único de Mongo lo rechaza), se repite todo con un código nuevo.
       if (!isDuplicateCodeError(err) || attempt === MAX_CODE_ATTEMPTS) throw err;
     }
   }
@@ -168,61 +230,24 @@ class TicketsService {
     // 1) El evento existe.
     const event = await findEventOrFail(eventId);
 
-    // 2) Está publicado (no cancelado, no finalizado, no borrador).
+    // 2) Está publicado (no cancelado, no finalizado, no borrador) y su fecha
+    // todavía no pasó.
     assertEventOpenForTickets(event);
 
     // 3) La cantidad es válida.
     const quantity = parseQuantity(body);
 
-    // 4) La persona no tiene ya un ticket activo para este evento.
-    const alreadyActive = await ticketsRepository.countActiveTickets(user.id, event.id);
-    if (alreadyActive > 0) {
-      throw new AppError('Ya tenés una inscripción activa para este evento', 409);
-    }
+    // 4) Reserva: duplicado, cupo y guardado, todo dentro de una transacción
+    // que bloquea el evento (ver reserveSeats). Como el cupo se comprueba y el
+    // ticket se guarda sin que nadie pueda colarse en el medio, no hace falta
+    // ninguna comprobación posterior.
+    const { event: lockedEvent, ticket } = await reserveSeats(event.id, user, quantity);
 
-    // 5) Hay cupo: lo ocupado se calcula sumando los tickets ACTIVOS.
-    const occupied = await ticketsRepository.countOccupiedSeats(event.id);
-    const available = Math.max(event.capacity - occupied, 0);
-    if (quantity > available) {
-      throw noSeatsError(available, quantity);
-    }
-
-    const ticket = await createWithUniqueCode({
-      user: user.id,
-      event: event.id,
-      quantity,
-      status: 'confirmed',
-    });
-
-    // 6) Segunda comprobación, por si dos pedidos llegaron al mismo tiempo.
-    // Los pasos 4 y 5 se hicieron ANTES de guardar, así que dos pedidos
-    // simultáneos podrían haber pasado los dos. Ahora que el ticket ya está
-    // guardado, se vuelve a mirar: si la reserva quedó duplicada o se pasó
-    // del cupo, este ticket se cancela (no se borra) y se avisa. Es la
-    // manera de no vender más lugares de los que hay.
-    const [totalOccupied, activeOfUser] = await Promise.all([
-      ticketsRepository.countOccupiedSeats(event.id),
-      ticketsRepository.countActiveTickets(user.id, event.id),
-    ]);
-
-    if (activeOfUser > 1) {
-      await ticketsRepository.cancelTicket(ticket.id);
-      throw new AppError('Ya tenés una inscripción activa para este evento', 409);
-    }
-
-    if (totalOccupied > event.capacity) {
-      await ticketsRepository.cancelTicket(ticket.id);
-      throw new AppError(
-        'No se pudo completar la inscripción porque otra persona reservó al mismo tiempo. Volvé a intentarlo para ver el cupo actualizado',
-        409
-      );
-    }
-
-    // 7) Email de confirmación. Si el envío falla, la inscripción sigue en
+    // 5) Email de confirmación. Si el envío falla, la inscripción sigue en
     // pie: solo se informa con emailSent: false.
     const emailSent = await mailService.sendTicketConfirmation({
       to: user.email,
-      event,
+      event: lockedEvent,
       ticket,
     });
 
