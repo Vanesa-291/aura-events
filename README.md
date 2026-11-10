@@ -7,6 +7,28 @@
 
 ---
 
+## Entrega final
+
+Esta es la **versión final e integrada** de la API: reúne todo lo construido en las pre-entregas anteriores (más las mejoras posteriores a sus correcciones) en una arquitectura por capas. Permite:
+
+- **Registrar usuarios, iniciar sesión, consultar el usuario actual y cerrar sesión**, con Passport (estrategias `register`, `login` y `current`) y un JWT guardado en una cookie `httpOnly`. Ninguna respuesta expone la contraseña.
+- **Proteger rutas y usar roles** (`user`, `organizer`, `admin`): `401` sin sesión y `403` sin el permiso necesario.
+- **Gestionar eventos**: crear, listar, ver, modificar y cambiar de estado, con validaciones y **filtros, paginación y orden** en el listado.
+- **Inscribirse a eventos con control de cupos** (el cupo se controla con una transacción de MongoDB, así que pedidos simultáneos nunca venden de más) y **cancelar inscripciones** sin borrarlas.
+- **Enviar un email de confirmación** con Nodemailer; las credenciales viven solo en variables de entorno.
+- Código organizado en **capas**: `routes`, `controllers`, `services`, `repositories`, `dao`, `dto`, `models`, `middlewares`, `utils` y `config`. Los modelos de Mongoose solo se importan en los DAOs.
+- **Tests automáticos** con `npm test`, sin base de datos.
+
+**Para probarla rápido**
+
+1. `npm install` (ver [Instalación](#instalación)).
+2. Copiar `.env.example` a `.env` y completarlo (ver [Configuración de variables de entorno](#configuración-de-variables-de-entorno)).
+3. `npm run dev` para levantar el servidor en `http://localhost:8080` (ver [Cómo ejecutar](#cómo-ejecutar)).
+4. Registrar usuarios por la API y asignarles rol con `npm run set-role` (ver [Roles y autorización](#roles-y-autorización)).
+5. Probar el recorrido completo con las rutas de [Rutas disponibles](#rutas-disponibles) y los casos de las secciones *Casos a probar*, o correr `npm test` (ver [Tests automáticos](#tests-automáticos)).
+
+---
+
 ## Temática elegida
 
 **Aura Events** es una plataforma para la gestión de eventos e inscripciones. Permite crear y administrar eventos, inscribirse a ellos con control de cupos y recibir un email de confirmación.
