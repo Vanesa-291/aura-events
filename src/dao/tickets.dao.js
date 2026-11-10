@@ -1,84 +1,73 @@
-// El DAO de tickets es, igual que el de eventos y el de usuarios, la única
-// capa que conversa directamente con MongoDB. Acá no hay reglas de negocio:
-// solo consultas. Qué se considera "cupo ocupado" o "ticket duplicado" lo
-// decide el service; este archivo solo sabe CÓMO preguntarle a la base.
+// El DAO de tickets es, igual que los de eventos y usuarios, la única capa
+// que conversa directamente con MongoDB, y el único archivo que importa el
+// modelo Ticket. Acá no hay reglas de negocio: solo operaciones genéricas.
+// Qué se considera "cupo ocupado" o "ticket activo" lo decide el repository
+// (con nombres del dominio) y las reglas que se hacen con eso, el service.
 
-import mongoose from 'mongoose';
-import Ticket, { ACTIVE_TICKET_STATUSES } from '../models/Ticket.js';
+import Ticket from '../models/Ticket.js';
 // Se importan los modelos que se usan en populate() para asegurarnos de que
 // estén registrados en Mongoose antes de la primera consulta.
 import '../models/Event.js';
 import '../models/User.js';
+
+// Los estados de un ticket viven junto al modelo. Se vuelven a exportar
+// desde acá para que las capas de arriba los puedan usar sin importar el
+// modelo directamente.
+export { TICKET_STATUSES, ACTIVE_TICKET_STATUSES } from '../models/Ticket.js';
 
 class TicketsDAO {
   async create(ticketData) {
     return await Ticket.create(ticketData);
   }
 
-  async getById(id) {
+  async findById(id) {
     return await Ticket.findById(id);
   }
 
-  // Los tickets de UNA persona, los más nuevos primero. populate() reemplaza
-  // el id del evento por sus datos, pero solo los tres campos que se
-  // necesitan mostrar (así no se devuelve de más).
-  async findByUser(userId) {
-    return await Ticket.find({ user: userId })
-      .sort({ createdAt: -1 })
-      .populate('event', 'title date location');
+  // Trae los tickets que cumplan el filtro. Opciones:
+  //
+  //   sort     → orden, por ejemplo { createdAt: -1 } (más nuevos primero)
+  //   populate → qué datos completar de los documentos relacionados, por
+  //              ejemplo { path: 'event', select: 'title date location' }:
+  //              reemplaza el id del evento por esos tres campos (así no se
+  //              trae de más).
+  async find(filter = {}, { sort, populate } = {}) {
+    let query = Ticket.find(filter);
+
+    if (sort) query = query.sort(sort);
+    if (populate) query = query.populate(populate);
+
+    return await query;
   }
 
-  // Los tickets de UN evento, los más nuevos primero. Para el organizer se
-  // completan nombre y email de cada persona (nunca la contraseña ni el
-  // rol). "status" es opcional: sirve para filtrar, por ejemplo, solo los
-  // confirmados.
-  async findByEvent(eventId, status) {
-    const filter = { event: eventId };
-    if (status) filter.status = status;
-
-    return await Ticket.find(filter)
-      .sort({ createdAt: -1 })
-      .populate('user', 'first_name last_name email');
+  async count(filter = {}) {
+    return await Ticket.countDocuments(filter);
   }
 
-  // Cuántos lugares están ocupados en un evento: la SUMA de "quantity" de
-  // los tickets activos (confirmed y pending). Los cancelled no entran.
+  // Suma el valor de un campo numérico (por ejemplo "quantity") de todos los
+  // tickets que cumplan el filtro. Devuelve 0 si no hay ninguno.
   // aggregate() no convierte los ids de texto a ObjectId por su cuenta
-  // (find() sí), por eso se hace a mano.
-  async sumActiveQuantityByEvent(eventId) {
+  // (find() sí), así que primero se le pide a Mongoose que castee el filtro.
+  async sum(field, filter = {}) {
+    const castFilter = Ticket.find(filter).cast(Ticket);
+
     const result = await Ticket.aggregate([
-      {
-        $match: {
-          event: new mongoose.Types.ObjectId(eventId),
-          status: { $in: ACTIVE_TICKET_STATUSES },
-        },
-      },
-      { $group: { _id: null, total: { $sum: '$quantity' } } },
+      { $match: castFilter },
+      { $group: { _id: null, total: { $sum: `$${field}` } } },
     ]);
 
     return result.length > 0 ? result[0].total : 0;
   }
 
-  // Cuántos tickets activos tiene una persona en un evento (sirve para
-  // detectar inscripciones duplicadas).
-  async countActiveByUserAndEvent(userId, eventId) {
-    return await Ticket.countDocuments({
-      user: userId,
-      event: eventId,
-      status: { $in: ACTIVE_TICKET_STATUSES },
+  // Actualiza UN ticket que cumpla el filtro y devuelve el ya actualizado (o
+  // null si ninguno lo cumplía). Que el filtro pueda incluir una condición
+  // sobre el estado hace que dos pedidos simultáneos no se pisen: solo uno
+  // logra el cambio y el otro recibe null.
+  async updateOne(filter, changes) {
+    return await Ticket.findOneAndUpdate(filter, changes, {
+      new: true,
+      runValidators: true,
     });
-  }
-
-  // Cancela un ticket: cambia el estado y anota cuándo. NO borra el
-  // documento. El filtro "status distinto de cancelled" hace que, si dos
-  // pedidos intentan cancelar el mismo ticket a la vez, solo uno lo logre
-  // (el otro recibe null).
-  async cancelById(id) {
-    return await Ticket.findOneAndUpdate(
-      { _id: id, status: { $ne: 'cancelled' } },
-      { $set: { status: 'cancelled', cancelledAt: new Date() } },
-      { new: true, runValidators: true }
-    );
   }
 }
 
