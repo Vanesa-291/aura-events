@@ -18,10 +18,9 @@
 //     sumando los tickets activos. Por eso, al cancelar un ticket, el lugar
 //     queda libre automáticamente, sin tener que "devolver" nada.
 
-import TicketsRepository from '../repositories/tickets.repository.js';
+import TicketsRepository, { TICKET_STATUSES } from '../repositories/tickets.repository.js';
 import EventsRepository from '../repositories/events.repository.js';
 import MailService from './mail.service.js';
-import { TICKET_STATUSES } from '../models/Ticket.js';
 import { PERMISSIONS } from '../config/roles.config.js';
 import { AppError } from '../utils/appError.js';
 import { randomInt } from 'node:crypto';
@@ -59,7 +58,7 @@ function assertValidId(id, label) {
 async function findEventOrFail(eventId) {
   assertValidId(eventId, 'evento');
 
-  const event = await eventsRepository.getById(eventId);
+  const event = await eventsRepository.findById(eventId);
   if (!event) {
     throw new AppError('Evento no encontrado', 404);
   }
@@ -176,13 +175,13 @@ class TicketsService {
     const quantity = parseQuantity(body);
 
     // 4) La persona no tiene ya un ticket activo para este evento.
-    const alreadyActive = await ticketsRepository.countActiveByUserAndEvent(user.id, event.id);
+    const alreadyActive = await ticketsRepository.countActiveTickets(user.id, event.id);
     if (alreadyActive > 0) {
       throw new AppError('Ya tenés una inscripción activa para este evento', 409);
     }
 
     // 5) Hay cupo: lo ocupado se calcula sumando los tickets ACTIVOS.
-    const occupied = await ticketsRepository.sumActiveQuantityByEvent(event.id);
+    const occupied = await ticketsRepository.countOccupiedSeats(event.id);
     const available = Math.max(event.capacity - occupied, 0);
     if (quantity > available) {
       throw noSeatsError(available, quantity);
@@ -202,17 +201,17 @@ class TicketsService {
     // del cupo, este ticket se cancela (no se borra) y se avisa. Es la
     // manera de no vender más lugares de los que hay.
     const [totalOccupied, activeOfUser] = await Promise.all([
-      ticketsRepository.sumActiveQuantityByEvent(event.id),
-      ticketsRepository.countActiveByUserAndEvent(user.id, event.id),
+      ticketsRepository.countOccupiedSeats(event.id),
+      ticketsRepository.countActiveTickets(user.id, event.id),
     ]);
 
     if (activeOfUser > 1) {
-      await ticketsRepository.cancelById(ticket.id);
+      await ticketsRepository.cancelTicket(ticket.id);
       throw new AppError('Ya tenés una inscripción activa para este evento', 409);
     }
 
     if (totalOccupied > event.capacity) {
-      await ticketsRepository.cancelById(ticket.id);
+      await ticketsRepository.cancelTicket(ticket.id);
       throw new AppError(
         'No se pudo completar la inscripción porque otra persona reservó al mismo tiempo. Volvé a intentarlo para ver el cupo actualizado',
         409
@@ -262,7 +261,7 @@ class TicketsService {
 
     const [tickets, occupied] = await Promise.all([
       ticketsRepository.findByEvent(event.id, status),
-      ticketsRepository.sumActiveQuantityByEvent(event.id),
+      ticketsRepository.countOccupiedSeats(event.id),
     ]);
 
     return {
@@ -281,7 +280,7 @@ class TicketsService {
   async cancelTicket(ticketId, user) {
     assertValidId(ticketId, 'ticket');
 
-    const ticket = await ticketsRepository.getById(ticketId);
+    const ticket = await ticketsRepository.findById(ticketId);
     if (!ticket) {
       throw new AppError('Ticket no encontrado', 404);
     }
@@ -294,7 +293,7 @@ class TicketsService {
       throw new AppError('El ticket ya está cancelado', 409);
     }
 
-    const cancelled = await ticketsRepository.cancelById(ticket.id);
+    const cancelled = await ticketsRepository.cancelTicket(ticket.id);
 
     // Si dos pedidos intentaron cancelar el mismo ticket a la vez, uno de
     // los dos llega acá con null.

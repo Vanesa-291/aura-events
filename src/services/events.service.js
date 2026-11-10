@@ -18,8 +18,7 @@
 //      de quién es. Por eso esa comprobación vive acá, en
 //      assertCanManage().
 
-import EventsRepository from '../repositories/events.repository.js';
-import { EVENT_STATUSES } from '../models/Event.js';
+import EventsRepository, { EVENT_STATUSES } from '../repositories/events.repository.js';
 import { PERMISSIONS } from '../config/roles.config.js';
 import { AppError } from '../utils/appError.js';
 
@@ -159,7 +158,7 @@ function assertValidId(id) {
 async function findEventOrFail(id) {
   assertValidId(id);
 
-  const event = await repository.getById(id);
+  const event = await repository.findById(id);
   if (!event) {
     throw new AppError('Evento no encontrado', 404);
   }
@@ -441,7 +440,7 @@ class EventsService {
       throw new AppError('No hay campos válidos para actualizar', 400);
     }
 
-    return await repository.updateById(id, changes);
+    return await repository.update(id, changes);
   }
 
   // Cambia el estado del evento respetando STATUS_TRANSITIONS. Cancelar un
@@ -479,7 +478,7 @@ class EventsService {
       );
     }
 
-    return await repository.updateById(id, { status: newStatus });
+    return await repository.updateStatus(id, newStatus);
   }
 }
 
